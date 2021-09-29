@@ -178,7 +178,7 @@ static av_always_inline int scaleforsame(VC1Context *v, int i, int n /* MV */,
     brfd      = FFMIN(v->brfd, 3);
     scalesame = ff_vc1_b_field_mvpred_scales[0][brfd];
 
-    n = (n * scalesame >> 8) * (1 << hpel);
+    n = (n * scalesame >> 8) << hpel;
     return n;
 }
 
@@ -191,16 +191,15 @@ static av_always_inline int scaleforopp(VC1Context *v, int n /* MV */,
     n >>= hpel;
     if (v->s.pict_type == AV_PICTURE_TYPE_B && !v->second_field && dir == 1) {
         if (dim)
-            n = scaleforopp_y(v, n, dir) * (1 << hpel);
+            n = scaleforopp_y(v, n, dir) << hpel;
         else
-            n = scaleforopp_x(v, n)      * (1 << hpel);
+            n = scaleforopp_x(v, n) << hpel;
         return n;
     }
     if (v->s.pict_type != AV_PICTURE_TYPE_B)
-        refdist = v->refdist;
+        refdist = FFMIN(v->refdist, 3);
     else
         refdist = dir ? v->brfd : v->frfd;
-    refdist = FFMIN(refdist, 3);
     scaleopp = ff_vc1_field_mvpred_scales[dir ^ v->second_field][0][refdist];
 
     n = (n * scaleopp >> 8) * (1 << hpel);

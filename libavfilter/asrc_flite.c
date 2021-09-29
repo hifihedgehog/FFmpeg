@@ -54,10 +54,10 @@ static const AVOption flite_options[] = {
     { "list_voices", "list voices and exit",              OFFSET(list_voices), AV_OPT_TYPE_BOOL, {.i64=0}, 0, 1, FLAGS },
     { "nb_samples",  "set number of samples per frame",   OFFSET(frame_nb_samples), AV_OPT_TYPE_INT, {.i64=512}, 0, INT_MAX, FLAGS },
     { "n",           "set number of samples per frame",   OFFSET(frame_nb_samples), AV_OPT_TYPE_INT, {.i64=512}, 0, INT_MAX, FLAGS },
-    { "text",        "set text to speak",                 OFFSET(text),      AV_OPT_TYPE_STRING, {.str=NULL}, 0, 0, FLAGS },
-    { "textfile",    "set filename of the text to speak", OFFSET(textfile),  AV_OPT_TYPE_STRING, {.str=NULL}, 0, 0, FLAGS },
-    { "v",           "set voice",                         OFFSET(voice_str), AV_OPT_TYPE_STRING, {.str="kal"}, 0, 0, FLAGS },
-    { "voice",       "set voice",                         OFFSET(voice_str), AV_OPT_TYPE_STRING, {.str="kal"}, 0, 0, FLAGS },
+    { "text",        "set text to speak",                 OFFSET(text),      AV_OPT_TYPE_STRING, {.str=NULL}, CHAR_MIN, CHAR_MAX, FLAGS },
+    { "textfile",    "set filename of the text to speak", OFFSET(textfile),  AV_OPT_TYPE_STRING, {.str=NULL}, CHAR_MIN, CHAR_MAX, FLAGS },
+    { "v",           "set voice",                         OFFSET(voice_str), AV_OPT_TYPE_STRING, {.str="kal"}, CHAR_MIN, CHAR_MAX, FLAGS },
+    { "voice",       "set voice",                         OFFSET(voice_str), AV_OPT_TYPE_STRING, {.str="kal"}, CHAR_MIN, CHAR_MAX, FLAGS },
     { NULL }
 };
 
@@ -81,7 +81,7 @@ struct voice_entry {
     void (*unregister_fn)(cst_voice *);
     cst_voice *voice;
     unsigned usage_count;
-};
+} voice_entry;
 
 #define MAKE_VOICE_STRUCTURE(voice_name) {             \
     .name          =                      #voice_name, \
@@ -271,9 +271,10 @@ static const AVFilterPad flite_outputs[] = {
         .config_props  = config_props,
         .request_frame = request_frame,
     },
+    { NULL }
 };
 
-const AVFilter ff_asrc_flite = {
+AVFilter ff_asrc_flite = {
     .name          = "flite",
     .description   = NULL_IF_CONFIG_SMALL("Synthesize voice from text using libflite."),
     .query_formats = query_formats,
@@ -281,6 +282,6 @@ const AVFilter ff_asrc_flite = {
     .uninit        = uninit,
     .priv_size     = sizeof(FliteContext),
     .inputs        = NULL,
-    FILTER_OUTPUTS(flite_outputs),
+    .outputs       = flite_outputs,
     .priv_class    = &flite_class,
 };

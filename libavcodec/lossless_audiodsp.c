@@ -20,15 +20,14 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#include "config.h"
-#include "libavutil/attributes.h"
+#include "avcodec.h"
 #include "lossless_audiodsp.h"
 
 static int32_t scalarproduct_and_madd_int16_c(int16_t *v1, const int16_t *v2,
                                               const int16_t *v3,
                                               int order, int mul)
 {
-    unsigned res = 0;
+    int res = 0;
 
     do {
         res   += *v1 * *v2++;

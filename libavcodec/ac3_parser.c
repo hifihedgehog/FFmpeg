@@ -29,6 +29,7 @@
 #include "aac_ac3_parser.h"
 #include "get_bits.h"
 
+#include "ac3tab.h" //PLEX
 
 #define AC3_HEADER_SIZE 7
 
@@ -201,12 +202,6 @@ static int ac3_sync(uint64_t state, AACAC3ParseContext *hdr_info,
     AC3HeaderInfo hdr;
     GetBitContext gbc;
 
-    if (tmp.u8[1] == 0x77 && tmp.u8[2] == 0x0b) {
-        FFSWAP(uint8_t, tmp.u8[1], tmp.u8[2]);
-        FFSWAP(uint8_t, tmp.u8[3], tmp.u8[4]);
-        FFSWAP(uint8_t, tmp.u8[5], tmp.u8[6]);
-    }
-
     init_get_bits(&gbc, tmp.u8+8-AC3_HEADER_SIZE, 54);
     err = ff_ac3_parse_header(&gbc, &hdr);
 
@@ -231,16 +226,64 @@ static int ac3_sync(uint64_t state, AACAC3ParseContext *hdr_info,
     return hdr.frame_size;
 }
 
+//PLEX
+static int ac3_parse_full(AVCodecParserContext *s1, AVCodecContext *avctx,
+                          const uint8_t *buf, int buf_size)
+{
+    AC3HeaderInfo hdr = {0};
+    int ret = 0;
+    uint64_t layout = 0;
+    while (hdr.frame_size < buf_size) {
+        GetBitContext gbc;
+
+        init_get_bits8(&gbc, buf, buf_size);
+
+        if ((ret = ff_ac3_parse_header(&gbc, &hdr)) < 0)
+            return ret;
+
+        if (hdr.frame_type == EAC3_FRAME_TYPE_DEPENDENT) {
+            int i;
+            skip_bits(&gbc, 5); // skip bitstream id
+            for (i = 0; i < (hdr.channel_mode ? 1 : 2); i++) {
+                skip_bits(&gbc, 5);
+                if (get_bits1(&gbc))
+                    skip_bits(&gbc, 8);
+            }
+            if (get_bits1(&gbc)) {
+                int channel_map = get_bits(&gbc, 16);
+                for (i = 0; i < 16; i++)
+                    if (channel_map & (1 << (EAC3_MAX_CHANNELS - i - 1)))
+                        layout |= ff_eac3_custom_channel_map_locations[i][1];
+                if (av_popcount64(hdr.channel_layout) > EAC3_MAX_CHANNELS)
+                    return AAC_AC3_PARSE_ERROR_CHANNEL_CFG;
+            }
+        } else {
+            layout |= hdr.channel_layout;
+        }
+
+        buf += hdr.frame_size;
+        buf_size -= hdr.frame_size;
+    }
+
+    avctx->channels = av_get_channel_layout_nb_channels(layout);
+    avctx->channel_layout = layout;
+
+    return 0;
+}
+//PLEX
+
 static av_cold int ac3_parse_init(AVCodecParserContext *s1)
 {
     AACAC3ParseContext *s = s1->priv_data;
     s->header_size = AC3_HEADER_SIZE;
     s->sync = ac3_sync;
+    s->parse_full = ac3_parse_full; //PLEX
+    s1->flags |= PARSER_FLAG_ONCE;
     return 0;
 }
 
 
-const AVCodecParser ff_ac3_parser = {
+AVCodecParser ff_ac3_parser = {
     .codec_ids      = { AV_CODEC_ID_AC3, AV_CODEC_ID_EAC3 },
     .priv_data_size = sizeof(AACAC3ParseContext),
     .parser_init    = ac3_parse_init,

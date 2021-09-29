@@ -102,19 +102,32 @@ static av_cold void uninit(AVFilterContext *ctx)
 
 static int query_formats(AVFilterContext *ctx)
 {
+    AVFilterChannelLayouts *layouts;
+    AVFilterFormats *formats;
     static const enum AVSampleFormat sample_fmts[] = {
         AV_SAMPLE_FMT_DBLP,
         AV_SAMPLE_FMT_NONE
     };
-    int ret = ff_set_common_all_channel_counts(ctx);
+    int ret;
+
+    layouts = ff_all_channel_counts();
+    if (!layouts)
+        return AVERROR(ENOMEM);
+    ret = ff_set_common_channel_layouts(ctx, layouts);
     if (ret < 0)
         return ret;
 
-    ret = ff_set_common_formats_from_list(ctx, sample_fmts);
+    formats = ff_make_format_list(sample_fmts);
+    if (!formats)
+        return AVERROR(ENOMEM);
+    ret = ff_set_common_formats(ctx, formats);
     if (ret < 0)
         return ret;
 
-    return ff_set_common_all_samplerates(ctx);
+    formats = ff_all_samplerates();
+    if (!formats)
+        return AVERROR(ENOMEM);
+    return ff_set_common_samplerates(ctx, formats);
 }
 
 static void count_items(char *item_str, int *nb_items)
@@ -336,17 +349,16 @@ static int config_output(AVFilterLink *outlink)
     }
 
     if (nb_attacks > channels || nb_decays > channels) {
-        av_log(ctx, AV_LOG_WARNING,
-                "Number of attacks/decays bigger than number of channels. Ignoring rest of entries.\n");
-        nb_attacks = FFMIN(nb_attacks, channels);
-        nb_decays  = FFMIN(nb_decays, channels);
+        av_log(ctx, AV_LOG_ERROR,
+                "Number of attacks/decays bigger than number of channels.\n");
+        return AVERROR(EINVAL);
     }
 
     uninit(ctx);
 
-    s->channels = av_calloc(channels, sizeof(*s->channels));
+    s->channels = av_mallocz_array(channels, sizeof(*s->channels));
     s->nb_segments = (nb_points + 4) * 2;
-    s->segments = av_calloc(s->nb_segments, sizeof(*s->segments));
+    s->segments = av_mallocz_array(s->nb_segments, sizeof(*s->segments));
 
     if (!s->channels || !s->segments) {
         uninit(ctx);
@@ -522,7 +534,7 @@ static int config_output(AVFilterLink *outlink)
     s->delay_frame->nb_samples     = s->delay_samples;
     s->delay_frame->channel_layout = outlink->channel_layout;
 
-    err = av_frame_get_buffer(s->delay_frame, 0);
+    err = av_frame_get_buffer(s->delay_frame, 32);
     if (err)
         return err;
 
@@ -558,6 +570,7 @@ static const AVFilterPad compand_inputs[] = {
         .type         = AVMEDIA_TYPE_AUDIO,
         .filter_frame = filter_frame,
     },
+    { NULL }
 };
 
 static const AVFilterPad compand_outputs[] = {
@@ -567,10 +580,11 @@ static const AVFilterPad compand_outputs[] = {
         .config_props  = config_output,
         .type          = AVMEDIA_TYPE_AUDIO,
     },
+    { NULL }
 };
 
 
-const AVFilter ff_af_compand = {
+AVFilter ff_af_compand = {
     .name           = "compand",
     .description    = NULL_IF_CONFIG_SMALL(
             "Compress or expand audio dynamic range."),
@@ -579,6 +593,6 @@ const AVFilter ff_af_compand = {
     .priv_class     = &compand_class,
     .init           = init,
     .uninit         = uninit,
-    FILTER_INPUTS(compand_inputs),
-    FILTER_OUTPUTS(compand_outputs),
+    .inputs         = compand_inputs,
+    .outputs        = compand_outputs,
 };

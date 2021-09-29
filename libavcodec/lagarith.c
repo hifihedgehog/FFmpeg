@@ -29,7 +29,6 @@
 
 #include "avcodec.h"
 #include "get_bits.h"
-#include "internal.h"
 #include "mathops.h"
 #include "lagarithrac.h"
 #include "lossless_videodsp.h"
@@ -226,9 +225,6 @@ static int lag_read_prob_header(lag_rac *rac, GetBitContext *gb)
              */
         }
     }
-
-    if (scale_factor > 23)
-        return AVERROR_INVALIDDATA;
 
     rac->scale = scale_factor;
 
@@ -713,14 +709,24 @@ static av_cold int lag_decode_init(AVCodecContext *avctx)
     return 0;
 }
 
-const AVCodec ff_lagarith_decoder = {
+#if HAVE_THREADS
+static av_cold int lag_decode_init_thread_copy(AVCodecContext *avctx)
+{
+    LagarithContext *l = avctx->priv_data;
+    l->avctx = avctx;
+
+    return 0;
+}
+#endif
+
+AVCodec ff_lagarith_decoder = {
     .name           = "lagarith",
     .long_name      = NULL_IF_CONFIG_SMALL("Lagarith lossless"),
     .type           = AVMEDIA_TYPE_VIDEO,
     .id             = AV_CODEC_ID_LAGARITH,
     .priv_data_size = sizeof(LagarithContext),
     .init           = lag_decode_init,
+    .init_thread_copy = ONLY_IF_THREADS_ENABLED(lag_decode_init_thread_copy),
     .decode         = lag_decode_frame,
     .capabilities   = AV_CODEC_CAP_DR1 | AV_CODEC_CAP_FRAME_THREADS,
-    .caps_internal  = FF_CODEC_CAP_INIT_THREADSAFE,
 };

@@ -15,61 +15,62 @@
  * License along with FFmpeg; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
-
 #define COBJMACROS
-#if !defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0602
-#undef _WIN32_WINNT
-#define _WIN32_WINNT 0x0602
-#endif
+#define _WIN32_WINNT 0x0601
 
 #include "mf_utils.h"
-#include "libavutil/pixdesc.h"
 
-HRESULT ff_MFGetAttributeSize(IMFAttributes *pattr, REFGUID guid,
-                              UINT32 *pw, UINT32 *ph)
+HRESULT ff_MFGetAttributeSize(
+  _In_  IMFAttributes *pAttributes,
+  _In_  REFGUID       guidKey,
+  _Out_ UINT32        *punWidth,
+  _Out_ UINT32        *punHeight
+)
 {
     UINT64 t;
-    HRESULT hr = IMFAttributes_GetUINT64(pattr, guid, &t);
+    HRESULT hr = IMFAttributes_GetUINT64(pAttributes, guidKey, &t);
     if (!FAILED(hr)) {
-        *pw = t >> 32;
-        *ph = (UINT32)t;
+        *punWidth = t >> 32;
+        *punHeight = (UINT32)t;
     }
     return hr;
 }
 
-HRESULT ff_MFSetAttributeSize(IMFAttributes *pattr, REFGUID guid,
-                              UINT32 uw, UINT32 uh)
+HRESULT ff_MFSetAttributeSize(
+  _In_ IMFAttributes *pAttributes,
+  _In_ REFGUID       guidKey,
+  _In_ UINT32        unWidth,
+  _In_ UINT32        unHeight
+)
 {
-    UINT64 t = (((UINT64)uw) << 32) | uh;
-    return IMFAttributes_SetUINT64(pattr, guid, t);
+    UINT64 t = (((UINT64)unWidth) << 32) | unHeight;
+    return IMFAttributes_SetUINT64(pAttributes, guidKey, t);
 }
 
 #define ff_MFSetAttributeRatio ff_MFSetAttributeSize
 #define ff_MFGetAttributeRatio ff_MFGetAttributeSize
 
-// MFTEnumEx was missing from mingw-w64's mfplat import library until
-// mingw-w64 v6.0.0, thus wrap it and load it using GetProcAddress.
-// It's also missing in Windows Vista's mfplat.dll.
-HRESULT ff_MFTEnumEx(GUID guidCategory, UINT32 Flags,
-                     const MFT_REGISTER_TYPE_INFO *pInputType,
-                     const MFT_REGISTER_TYPE_INFO *pOutputType,
-                     IMFActivate ***pppMFTActivate, UINT32 *pnumMFTActivate)
+// Awesome: mingw lacks MTEnumEx in mfplat.a import lib. Screw it.
+HRESULT ff_MFTEnumEx(
+    _In_        GUID                   guidCategory,
+    _In_        UINT32                 Flags,
+    _In_  const MFT_REGISTER_TYPE_INFO *pInputType,
+    _In_  const MFT_REGISTER_TYPE_INFO *pOutputType,
+    _Out_       IMFActivate            ***pppMFTActivate,
+    _Out_       UINT32                 *pcMFTActivate
+    )
 {
-    HRESULT (WINAPI *MFTEnumEx_ptr)(GUID guidCategory, UINT32 Flags,
-                                    const MFT_REGISTER_TYPE_INFO *pInputType,
-                                    const MFT_REGISTER_TYPE_INFO *pOutputType,
-                                    IMFActivate ***pppMFTActivate,
-                                    UINT32 *pnumMFTActivate) = NULL;
-#if !HAVE_UWP
+    HRESULT (WINAPI *MFTEnumEx_ptr)(
+    _In_        GUID                   guidCategory,
+    _In_        UINT32                 Flags,
+    _In_  const MFT_REGISTER_TYPE_INFO *pInputType,
+    _In_  const MFT_REGISTER_TYPE_INFO *pOutputType,
+    _Out_       IMFActivate            ***pppMFTActivate,
+    _Out_       UINT32                 *pcMFTActivate
+    ) = NULL;
     HANDLE lib = GetModuleHandleW(L"mfplat.dll");
     if (lib)
         MFTEnumEx_ptr = (void *)GetProcAddress(lib, "MFTEnumEx");
-#else
-    // In UWP (which lacks GetModuleHandle), just link directly against
-    // the functions - this requires building with new/complete enough
-    // import libraries.
-    MFTEnumEx_ptr = MFTEnumEx;
-#endif
     if (!MFTEnumEx_ptr)
         return E_FAIL;
     return MFTEnumEx_ptr(guidCategory,
@@ -77,7 +78,7 @@ HRESULT ff_MFTEnumEx(GUID guidCategory, UINT32 Flags,
                          pInputType,
                          pOutputType,
                          pppMFTActivate,
-                         pnumMFTActivate);
+                         pcMFTActivate);
 }
 
 char *ff_hr_str_buf(char *buf, size_t size, HRESULT hr)
@@ -219,7 +220,7 @@ const GUID *ff_pix_fmt_to_guid(enum AVPixelFormat pix_fmt)
 
 // If this GUID is of the form XXXXXXXX-0000-0010-8000-00AA00389B71, then
 // extract the XXXXXXXX prefix as FourCC (oh the pain).
-int ff_fourcc_from_guid(const GUID *guid, uint32_t *out_fourcc)
+int ff_fourcc_from_guid(GUID *guid, uint32_t *out_fourcc)
 {
     if (guid->Data2 == 0 && guid->Data3 == 0x0010 &&
         guid->Data4[0] == 0x80 &&
@@ -274,8 +275,8 @@ static struct GUID_Entry guid_names[] = {
     GUID_ENTRY(MFAudioFormat_Float),
     GUID_ENTRY(MFVideoFormat_H264),
     GUID_ENTRY(MFVideoFormat_H264_ES),
-    GUID_ENTRY(ff_MFVideoFormat_HEVC),
-    GUID_ENTRY(ff_MFVideoFormat_HEVC_ES),
+    GUID_ENTRY(MFVideoFormat_HEVC),
+    GUID_ENTRY(MFVideoFormat_HEVC_ES),
     GUID_ENTRY(MFVideoFormat_MPEG2),
     GUID_ENTRY(MFVideoFormat_MP43),
     GUID_ENTRY(MFVideoFormat_MP4V),
@@ -288,10 +289,12 @@ static struct GUID_Entry guid_names[] = {
     GUID_ENTRY(MFAudioFormat_AAC),
     GUID_ENTRY(MFAudioFormat_MP3),
     GUID_ENTRY(MFAudioFormat_MSP1),
+    GUID_ENTRY(ff_MFAudioFormat_MSAUDIO1),
     GUID_ENTRY(MFAudioFormat_WMAudioV8),
     GUID_ENTRY(MFAudioFormat_WMAudioV9),
     GUID_ENTRY(MFAudioFormat_WMAudio_Lossless),
     GUID_ENTRY(MF_MT_ALL_SAMPLES_INDEPENDENT),
+    GUID_ENTRY(MF_MT_AM_FORMAT_TYPE),
     GUID_ENTRY(MF_MT_COMPRESSED),
     GUID_ENTRY(MF_MT_FIXED_SIZE_SAMPLES),
     GUID_ENTRY(MF_MT_SAMPLE_SIZE),
@@ -313,8 +316,10 @@ static struct GUID_Entry guid_names[] = {
     GUID_ENTRY(MF_MT_AUDIO_WMADRC_AVGTARGET),
     GUID_ENTRY(MF_MT_AUDIO_WMADRC_PEAKREF),
     GUID_ENTRY(MF_MT_AUDIO_WMADRC_PEAKTARGET),
+    GUID_ENTRY(MF_MT_ORIGINAL_WAVE_FORMAT_TAG),
     GUID_ENTRY(MF_MT_AVG_BIT_ERROR_RATE),
     GUID_ENTRY(MF_MT_AVG_BITRATE),
+    GUID_ENTRY(MF_MT_CUSTOM_VIDEO_PRIMARIES),
     GUID_ENTRY(MF_MT_DEFAULT_STRIDE),
     GUID_ENTRY(MF_MT_DRM_FLAGS),
     GUID_ENTRY(MF_MT_FRAME_RATE),
@@ -330,6 +335,7 @@ static struct GUID_Entry guid_names[] = {
     GUID_ENTRY(MF_MT_MPEG2_FLAGS),
     GUID_ENTRY(MF_MT_MPEG2_LEVEL),
     GUID_ENTRY(MF_MT_MPEG2_PROFILE),
+    GUID_ENTRY(MF_MT_ORIGINAL_4CC),
     GUID_ENTRY(MF_MT_PAD_CONTROL_FLAGS),
     GUID_ENTRY(MF_MT_PALETTE),
     GUID_ENTRY(MF_MT_PAN_SCAN_APERTURE),
@@ -337,12 +343,15 @@ static struct GUID_Entry guid_names[] = {
     GUID_ENTRY(MF_MT_PIXEL_ASPECT_RATIO),
     GUID_ENTRY(MF_MT_SOURCE_CONTENT_HINT),
     GUID_ENTRY(MF_MT_TRANSFER_FUNCTION),
+    //GUID_ENTRY(MF_MT_VIDEO_3D),
     GUID_ENTRY(MF_MT_VIDEO_CHROMA_SITING),
     GUID_ENTRY(MF_MT_VIDEO_LIGHTING),
     GUID_ENTRY(MF_MT_VIDEO_NOMINAL_RANGE),
     GUID_ENTRY(MF_MT_VIDEO_PRIMARIES),
-    GUID_ENTRY(MF_MT_VIDEO_ROTATION),
+    GUID_ENTRY(ff_MF_MT_VIDEO_ROTATION),
     GUID_ENTRY(MF_MT_YUV_MATRIX),
+    //GUID_ENTRY(MF_XVP_CALLER_ALLOCATES_OUTPUT),
+    //GUID_ENTRY(MF_XVP_DISABLE_FRC),
     GUID_ENTRY(ff_CODECAPI_AVDecVideoThumbnailGenerationMode),
     GUID_ENTRY(ff_CODECAPI_AVDecVideoDropPicWithMissingRef),
     GUID_ENTRY(ff_CODECAPI_AVDecVideoSoftwareDeinterlaceMode),
@@ -361,7 +370,7 @@ static struct GUID_Entry guid_names[] = {
     GUID_ENTRY(ff_CODECAPI_AVDecDisableVideoPostProcessing),
 };
 
-char *ff_guid_str_buf(char *buf, size_t buf_size, const GUID *guid)
+char *ff_guid_str_buf(char *buf, size_t buf_size, GUID *guid)
 {
     uint32_t fourcc;
     int n;
@@ -373,10 +382,13 @@ char *ff_guid_str_buf(char *buf, size_t buf_size, const GUID *guid)
     }
 
     if (ff_fourcc_from_guid(guid, &fourcc) >= 0) {
-        snprintf(buf, buf_size, "<FourCC %s>", av_fourcc2str(fourcc));
+        char tag[32];
+        av_get_codec_tag_string(tag, sizeof(tag), fourcc);
+        snprintf(buf, buf_size, "<FourCC %s>", tag);
         return buf;
     }
 
+    // copy&pasted from somewhere
     snprintf(buf, buf_size,
              "{%8.8x-%4.4x-%4.4x-%2.2x%2.2x-%2.2x%2.2x%2.2x%2.2x%2.2x%2.2x}",
              (unsigned) guid->Data1, guid->Data2, guid->Data3,
@@ -536,19 +548,68 @@ void ff_media_type_dump(void *log, IMFMediaType *type)
     ff_attributes_dump(log, (IMFAttributes *)type);
 }
 
+static void release_buffer(void *opaque, uint8_t *data)
+{
+    IMFMediaBuffer *buffer = opaque;
+    IMFMediaBuffer_Unlock(buffer);
+    IMFMediaBuffer_Release(buffer);
+}
+
+// Setup refcounting such that the AVFrame references the buffer. This increases
+// the buffer's refcount on success.
+int ff_create_mf_buffer_ref(AVCodecContext *avctx, AVFrame *frame,
+                            IMFMediaBuffer *buffer)
+{
+    HRESULT hr;
+    BYTE *data;
+    DWORD length;
+
+    hr = IMFMediaBuffer_Lock(buffer, &data, NULL, &length);
+    if (FAILED(hr))
+        return AVERROR_EXTERNAL;
+
+    frame->buf[0] = av_buffer_create(data, length, release_buffer, buffer,
+                                     AV_BUFFER_FLAG_READONLY);
+    if (!frame->buf[0]) {
+        IMFMediaBuffer_Unlock(buffer);
+        return AVERROR(ENOMEM);
+    }
+
+    IMFMediaBuffer_AddRef(buffer);
+    return 0;
+}
+
 const CLSID *ff_codec_to_mf_subtype(enum AVCodecID codec)
 {
     switch (codec) {
     case AV_CODEC_ID_H264:              return &MFVideoFormat_H264;
-    case AV_CODEC_ID_HEVC:              return &ff_MFVideoFormat_HEVC;
+    case AV_CODEC_ID_HEVC:              return &MFVideoFormat_HEVC;
+    case AV_CODEC_ID_MJPEG:             return &MFVideoFormat_MJPG;
+    case AV_CODEC_ID_MPEG2VIDEO:        return &MFVideoFormat_MPEG2;
+    case AV_CODEC_ID_MPEG4:             return &MFVideoFormat_MP4V;
+    case AV_CODEC_ID_MSMPEG4V1:
+    case AV_CODEC_ID_MSMPEG4V2:         return &ff_MFVideoFormat_MP42;
+    case AV_CODEC_ID_MSMPEG4V3:         return &MFVideoFormat_MP43;
+    case AV_CODEC_ID_WMV1:              return &MFVideoFormat_WMV1;
+    case AV_CODEC_ID_WMV2:              return &MFVideoFormat_WMV2;
+    case AV_CODEC_ID_WMV3:              return &MFVideoFormat_WMV3;
+    case AV_CODEC_ID_VC1:               return &MFVideoFormat_WVC1;
     case AV_CODEC_ID_AC3:               return &MFAudioFormat_Dolby_AC3;
+    case AV_CODEC_ID_EAC3:              return &MFAudioFormat_Dolby_DDPlus;
     case AV_CODEC_ID_AAC:               return &MFAudioFormat_AAC;
+    case AV_CODEC_ID_MP1:               return &MFAudioFormat_MPEG;
+    case AV_CODEC_ID_MP2:               return &MFAudioFormat_MPEG;
     case AV_CODEC_ID_MP3:               return &MFAudioFormat_MP3;
+    case AV_CODEC_ID_WMAVOICE:          return &MFAudioFormat_MSP1;
+    case AV_CODEC_ID_WMAV1:             return &ff_MFAudioFormat_MSAUDIO1;
+    case AV_CODEC_ID_WMAV2:             return &MFAudioFormat_WMAudioV8;
+    case AV_CODEC_ID_WMAPRO:            return &MFAudioFormat_WMAudioV9;
+    case AV_CODEC_ID_WMALOSSLESS:       return &MFAudioFormat_WMAudio_Lossless;
     default:                            return NULL;
     }
 }
 
-static int init_com_mf(void *log)
+int ff_init_com_mf(void *log)
 {
     HRESULT hr;
 
@@ -564,17 +625,10 @@ static int init_com_mf(void *log)
     hr = MFStartup(MF_VERSION, MFSTARTUP_FULL);
     if (FAILED(hr)) {
         av_log(log, AV_LOG_ERROR, "could not initialize MediaFoundation\n");
-        CoUninitialize();
         return AVERROR(ENOSYS);
     }
 
     return 0;
-}
-
-static void uninit_com_mf(void)
-{
-    MFShutdown();
-    CoUninitialize();
 }
 
 // Find and create a IMFTransform with the given input/output types. When done,
@@ -594,7 +648,7 @@ int ff_instantiate_mf(void *log,
     IMFActivate *winner = 0;
     UINT32 flags;
 
-    ret = init_com_mf(log);
+    ret = ff_init_com_mf(log);
     if (ret < 0)
         return ret;
 
@@ -606,8 +660,7 @@ int ff_instantiate_mf(void *log,
         flags |= MFT_ENUM_FLAG_SYNCMFT;
     }
 
-    hr = ff_MFTEnumEx(category, flags, in_type, out_type, &activate,
-                      &num_activate);
+    hr = ff_MFTEnumEx(category, flags, in_type, out_type, &activate, &num_activate);
     if (FAILED(hr))
         goto error_uninit_mf;
 
@@ -621,12 +674,13 @@ int ff_instantiate_mf(void *log,
         }
     }
 
-    *res = NULL;
     for (n = 0; n < num_activate; n++) {
         if (log)
             av_log(log, AV_LOG_VERBOSE, "activate MFT %d\n", n);
         hr = IMFActivate_ActivateObject(activate[n], &IID_IMFTransform,
                                         (void **)res);
+        if (FAILED(hr))
+            *res = NULL;
         if (*res) {
             winner = activate[n];
             IMFActivate_AddRef(winner);
@@ -655,8 +709,7 @@ int ff_instantiate_mf(void *log,
             IMFAttributes_Release(attrs);
         }
 
-        hr = IMFActivate_GetString(winner, &MFT_FRIENDLY_NAME_Attribute, s,
-                                   sizeof(s), NULL);
+        hr = IMFActivate_GetString(winner, &MFT_FRIENDLY_NAME_Attribute, s, sizeof(s), NULL);
         if (!FAILED(hr))
             av_log(log, AV_LOG_INFO, "MFT name: '%ls'\n", s);
 
@@ -667,7 +720,6 @@ int ff_instantiate_mf(void *log,
     return 0;
 
 error_uninit_mf:
-    uninit_com_mf();
     return AVERROR(ENOSYS);
 }
 
@@ -676,5 +728,4 @@ void ff_free_mf(IMFTransform **mft)
     if (*mft)
         IMFTransform_Release(*mft);
     *mft = NULL;
-    uninit_com_mf();
 }

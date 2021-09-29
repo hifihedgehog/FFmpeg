@@ -29,74 +29,12 @@ struct MpvParseContext {
     AVRational frame_rate;
     int progressive_sequence;
     int width, height;
+    //PLEX
+    int ps_width, ps_height;
+    int aspect_ratio_info;
+    //PLEX
 };
 
-#if !FF_API_FLAG_TRUNCATED
-/**
- * Find the end of the current frame in the bitstream.
- * @return the position of the first byte of the next frame, or -1
- */
-static int mpeg1_find_frame_end(ParseContext *pc, const uint8_t *buf,
-                                int buf_size, AVCodecParserContext *s)
-{
-    int i;
-    uint32_t state = pc->state;
-
-    /* EOF considered as end of frame */
-    if (buf_size == 0)
-        return 0;
-
-/*
- 0  frame start         -> 1/4
- 1  first_SEQEXT        -> 0/2
- 2  first field start   -> 3/0
- 3  second_SEQEXT       -> 2/0
- 4  searching end
-*/
-
-    for (i = 0; i < buf_size; i++) {
-        av_assert1(pc->frame_start_found >= 0 && pc->frame_start_found <= 4);
-        if (pc->frame_start_found & 1) {
-            if (state == EXT_START_CODE && (buf[i] & 0xF0) != 0x80)
-                pc->frame_start_found--;
-            else if (state == EXT_START_CODE + 2) {
-                if ((buf[i] & 3) == 3)
-                    pc->frame_start_found = 0;
-                else
-                    pc->frame_start_found = (pc->frame_start_found + 1) & 3;
-            }
-            state++;
-        } else {
-            i = avpriv_find_start_code(buf + i, buf + buf_size, &state) - buf - 1;
-            if (pc->frame_start_found == 0 && state >= SLICE_MIN_START_CODE && state <= SLICE_MAX_START_CODE) {
-                i++;
-                pc->frame_start_found = 4;
-            }
-            if (state == SEQ_END_CODE) {
-                pc->frame_start_found = 0;
-                pc->state = -1;
-                return i + 1;
-            }
-            if (pc->frame_start_found == 2 && state == SEQ_START_CODE)
-                pc->frame_start_found = 0;
-            if (pc->frame_start_found  < 4 && state == EXT_START_CODE)
-                pc->frame_start_found++;
-            if (pc->frame_start_found == 4 && (state & 0xFFFFFF00) == 0x100) {
-                if (state < SLICE_MIN_START_CODE || state > SLICE_MAX_START_CODE) {
-                    pc->frame_start_found = 0;
-                    pc->state             = -1;
-                    return i - 3;
-                }
-            }
-            if (pc->frame_start_found == 0 && s && state == PICTURE_START_CODE) {
-                ff_fetch_timestamp(s, i - 3, 1, i > 3);
-            }
-        }
-    }
-    pc->state = state;
-    return END_NOT_FOUND;
-}
-#endif
 
 static void mpegvideo_extract_headers(AVCodecParserContext *s,
                                       AVCodecContext *avctx,
@@ -134,6 +72,7 @@ static void mpegvideo_extract_headers(AVCodecParserContext *s,
             if (bytes_left >= 7) {
                 pc->width  = (buf[0] << 4) | (buf[1] >> 4);
                 pc->height = ((buf[1] & 0x0f) << 8) | buf[2];
+                pc->aspect_ratio_info = buf[3] >> 4;
                 if(!avctx->width || !avctx->height || !avctx->coded_width || !avctx->coded_height){
                     set_dim_ret = ff_set_dimensions(avctx, pc->width, pc->height);
                     did_set_size=1;
@@ -178,6 +117,17 @@ static void mpegvideo_extract_headers(AVCodecParserContext *s,
                         avctx->ticks_per_frame = 2;
                     }
                     break;
+                //PLEX
+                case 0x2: /* sequence display extension */
+                    {
+                        const uint8_t *seqbuf = buf + 1;
+                        if (buf[0] & 0x01)
+                            seqbuf += 3;
+                        pc->ps_width = ((seqbuf[0] << 6) | (seqbuf[1] >> 2)) * 16;
+                        pc->ps_height = (((seqbuf[1] & 0x01 << 13)) | (seqbuf[2] << 5) | (seqbuf[3] >> 3)) * 16;
+                    }
+                    break;
+                //PLEX
                 case 0x8: /* picture coding extension */
                     if (bytes_left >= 5) {
                         top_field_first = buf[3] & (1 << 7);
@@ -209,6 +159,12 @@ static void mpegvideo_extract_headers(AVCodecParserContext *s,
                 }
             }
             break;
+        case USER_START_CODE:
+            if (bytes_left >= 6 &&
+                AV_RL32(buf) == MKTAG('G','A','9','4') &&
+                buf[4] == 3 && (buf[5] & 0x40))
+                avctx->properties |= FF_CODEC_PROPERTY_CLOSED_CAPTIONS;
+            break;
         case -1:
             goto the_end;
         default:
@@ -220,7 +176,7 @@ static void mpegvideo_extract_headers(AVCodecParserContext *s,
             break;
         }
     }
- the_end:
+ the_end: ;
     if (set_dim_ret < 0)
         av_log(avctx, AV_LOG_ERROR, "Failed to set dimensions\n");
 
@@ -240,6 +196,47 @@ static void mpegvideo_extract_headers(AVCodecParserContext *s,
         s->coded_height = FFALIGN(pc->height, 16);
     }
 
+    //PLEX: copied from mpeg12dec.c
+    if (pc->aspect_ratio_info) {
+        if (avctx->codec_id == AV_CODEC_ID_MPEG1VIDEO) {
+            // MPEG-1 aspect
+            avctx->sample_aspect_ratio = av_d2q(1.0 / ff_mpeg1_aspect[pc->aspect_ratio_info], 255);
+        } else if (pc->aspect_ratio_info > 1) { // MPEG-2
+            // MPEG-2 aspect
+            AVRational dar =
+                av_mul_q(av_div_q(ff_mpeg2_aspect[pc->aspect_ratio_info],
+                                  (AVRational) { pc->ps_width,
+                                                 pc->ps_height }),
+                         (AVRational) { s->width, s->height });
+
+            /* We ignore the spec here and guess a bit as reality does not
+             * match the spec, see for example res_change_ffmpeg_aspect.ts
+             * and sequence-display-aspect.mpg.
+             * issue1613, 621, 562 */
+            if ((pc->ps_width == 0) || (pc->ps_height == 0) ||
+                (av_cmp_q(dar, (AVRational) { 4, 3 }) &&
+                 av_cmp_q(dar, (AVRational) { 16, 9 }))) {
+                avctx->sample_aspect_ratio =
+                    av_div_q(ff_mpeg2_aspect[pc->aspect_ratio_info],
+                             (AVRational) { s->width, s->height });
+            } else {
+                avctx->sample_aspect_ratio =
+                    av_div_q(ff_mpeg2_aspect[pc->aspect_ratio_info],
+                             (AVRational) { pc->ps_width, pc->ps_height });
+// issue1613 4/3 16/9 -> 16/9
+// res_change_ffmpeg_aspect.ts 4/3 225/44 ->4/3
+// widescreen-issue562.mpg 4/3 16/9 -> 16/9
+//                s->avctx->sample_aspect_ratio = av_mul_q(s->avctx->sample_aspect_ratio, (AVRational) {s->width, s->height});
+                ff_dlog(avctx, "aspect A %d/%d\n",
+                        ff_mpeg2_aspect[pc->aspect_ratio_info].num,
+                        ff_mpeg2_aspect[pc->aspect_ratio_info].den);
+                ff_dlog(avctx, "aspect B %d/%d\n", avctx->sample_aspect_ratio.num,
+                        avctx->sample_aspect_ratio.den);
+            }
+        } // MPEG-2
+    }
+    //PLEX
+
 #if FF_API_AVCTX_TIMEBASE
     if (avctx->framerate.num)
         avctx->time_base = av_inv_q(av_mul_q(avctx->framerate, (AVRational){avctx->ticks_per_frame, 1}));
@@ -258,11 +255,7 @@ static int mpegvideo_parse(AVCodecParserContext *s,
     if(s->flags & PARSER_FLAG_COMPLETE_FRAMES){
         next= buf_size;
     }else{
-#if FF_API_FLAG_TRUNCATED
         next= ff_mpeg1_find_frame_end(pc, buf, buf_size, s);
-#else
-        next = mpeg1_find_frame_end(pc, buf, buf_size, s);
-#endif
 
         if (ff_combine_frame(pc, next, &buf, &buf_size) < 0) {
             *poutbuf = NULL;
@@ -283,16 +276,34 @@ static int mpegvideo_parse(AVCodecParserContext *s,
     return next;
 }
 
+static int mpegvideo_split(AVCodecContext *avctx,
+                           const uint8_t *buf, int buf_size)
+{
+    int i;
+    uint32_t state= -1;
+    int found=0;
+
+    for(i=0; i<buf_size; i++){
+        state= (state<<8) | buf[i];
+        if(state == 0x1B3){
+            found=1;
+        }else if(found && state != 0x1B5 && state < 0x200 && state >= 0x100)
+            return i-3;
+    }
+    return 0;
+}
+
 static int mpegvideo_parse_init(AVCodecParserContext *s)
 {
     s->pict_type = AV_PICTURE_TYPE_NONE; // first frame might be partial
     return 0;
 }
 
-const AVCodecParser ff_mpegvideo_parser = {
+AVCodecParser ff_mpegvideo_parser = {
     .codec_ids      = { AV_CODEC_ID_MPEG1VIDEO, AV_CODEC_ID_MPEG2VIDEO },
     .priv_data_size = sizeof(struct MpvParseContext),
     .parser_init    = mpegvideo_parse_init,
     .parser_parse   = mpegvideo_parse,
     .parser_close   = ff_parse_close,
+    .split          = mpegvideo_split,
 };

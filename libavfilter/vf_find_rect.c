@@ -22,6 +22,7 @@
  * @todo switch to dualinput
  */
 
+#include "libavutil/avassert.h"
 #include "libavutil/imgutils.h"
 #include "libavutil/opt.h"
 #include "internal.h"
@@ -40,7 +41,6 @@ typedef struct FOCContext {
     AVFrame *obj_frame;
     AVFrame *needle_frame[MAX_MIPMAPS];
     AVFrame *haystack_frame[MAX_MIPMAPS];
-    int discard;
 } FOCContext;
 
 #define OFFSET(x) offsetof(FOCContext, x)
@@ -53,7 +53,6 @@ static const AVOption find_rect_options[] = {
     { "ymin", "", OFFSET(ymin), AV_OPT_TYPE_INT, {.i64 = 0}, 0, INT_MAX, FLAGS },
     { "xmax", "", OFFSET(xmax), AV_OPT_TYPE_INT, {.i64 = 0}, 0, INT_MAX, FLAGS },
     { "ymax", "", OFFSET(ymax), AV_OPT_TYPE_INT, {.i64 = 0}, 0, INT_MAX, FLAGS },
-    { "discard", "", OFFSET(discard), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, FLAGS },
     { NULL }
 };
 
@@ -67,7 +66,7 @@ static int query_formats(AVFilterContext *ctx)
         AV_PIX_FMT_NONE
     };
 
-    return ff_set_common_formats_from_list(ctx, pix_fmts);
+    return ff_set_common_formats(ctx, ff_make_format_list(pix_fmts));
 }
 
 static AVFrame *downscale(AVFrame *in)
@@ -82,7 +81,7 @@ static AVFrame *downscale(AVFrame *in)
     frame->width  = (in->width + 1) / 2;
     frame->height = (in->height+ 1) / 2;
 
-    if (av_frame_get_buffer(frame, 0) < 0) {
+    if (av_frame_get_buffer(frame, 32) < 0) {
         av_frame_free(&frame);
         return NULL;
     }
@@ -160,7 +159,7 @@ static float search(FOCContext *foc, int pass, int maxpass, int xmin, int xmax, 
 
     if (pass + 1 <= maxpass) {
         int sub_x, sub_y;
-        search(foc, pass+1, maxpass, xmin>>1, (xmax+1)>>1, ymin>>1, (ymax+1)>>1, &sub_x, &sub_y, 2.0);
+        search(foc, pass+1, maxpass, xmin>>1, (xmax+1)>>1, ymin>>1, (ymax+1)>>1, &sub_x, &sub_y, 1.0);
         xmin = FFMAX(xmin, 2*sub_x - 4);
         xmax = FFMIN(xmax, 2*sub_x + 4);
         ymin = FFMAX(ymin, 2*sub_y - 4);
@@ -170,6 +169,7 @@ static float search(FOCContext *foc, int pass, int maxpass, int xmin, int xmax, 
     for (y = ymin; y <= ymax; y++) {
         for (x = xmin; x <= xmax; x++) {
             float score = compare(foc->haystack_frame[pass], foc->needle_frame[pass], x, y);
+            av_assert0(score != 0);
             if (score < best_score) {
                 best_score = score;
                 *best_x = x;
@@ -187,7 +187,6 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
     float best_score;
     int best_x, best_y;
     int i;
-    char buf[32];
 
     foc->haystack_frame[0] = av_frame_clone(in);
     for (i=1; i<foc->mipmaps; i++) {
@@ -199,7 +198,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
                         FFMIN(foc->xmax, foc->last_x + 8),
                         FFMAX(foc->ymin, foc->last_y - 8),
                         FFMIN(foc->ymax, foc->last_y + 8),
-                        &best_x, &best_y, 2.0);
+                        &best_x, &best_y, 1.0);
 
     best_score = search(foc, 0, foc->mipmaps - 1, foc->xmin, foc->xmax, foc->ymin, foc->ymax,
                         &best_x, &best_y, best_score);
@@ -209,27 +208,19 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
     }
 
     if (best_score > foc->threshold) {
-        if (foc->discard) {
-            av_frame_free(&in);
-            return 0;
-        } else {
-            return ff_filter_frame(ctx->outputs[0], in);
-        }
+        return ff_filter_frame(ctx->outputs[0], in);
     }
 
-    av_log(ctx, AV_LOG_INFO, "Found at n=%"PRId64" pts_time=%f x=%d y=%d with score=%f\n",
-           inlink->frame_count_out, TS2D(in->pts) * av_q2d(inlink->time_base),
-           best_x, best_y, best_score);
+    av_log(ctx, AV_LOG_DEBUG, "Found at %d %d score %f\n", best_x, best_y, best_score);
     foc->last_x = best_x;
     foc->last_y = best_y;
 
-    snprintf(buf, sizeof(buf), "%f", best_score);
+    av_frame_make_writable(in);
 
     av_dict_set_int(&in->metadata, "lavfi.rect.w", foc->obj_frame->width, 0);
     av_dict_set_int(&in->metadata, "lavfi.rect.h", foc->obj_frame->height, 0);
     av_dict_set_int(&in->metadata, "lavfi.rect.x", best_x, 0);
     av_dict_set_int(&in->metadata, "lavfi.rect.y", best_y, 0);
-    av_dict_set(&in->metadata, "lavfi.rect.score", buf, 0);
 
     return ff_filter_frame(ctx->outputs[0], in);
 }
@@ -290,6 +281,7 @@ static const AVFilterPad foc_inputs[] = {
         .config_props = config_input,
         .filter_frame = filter_frame,
     },
+    { NULL }
 };
 
 static const AVFilterPad foc_outputs[] = {
@@ -297,16 +289,17 @@ static const AVFilterPad foc_outputs[] = {
         .name = "default",
         .type = AVMEDIA_TYPE_VIDEO,
     },
+    { NULL }
 };
 
-const AVFilter ff_vf_find_rect = {
+AVFilter ff_vf_find_rect = {
     .name            = "find_rect",
     .description     = NULL_IF_CONFIG_SMALL("Find a user specified object."),
     .priv_size       = sizeof(FOCContext),
     .init            = init,
     .uninit          = uninit,
     .query_formats   = query_formats,
-    FILTER_INPUTS(foc_inputs),
-    FILTER_OUTPUTS(foc_outputs),
+    .inputs          = foc_inputs,
+    .outputs         = foc_outputs,
     .priv_class      = &find_rect_class,
 };

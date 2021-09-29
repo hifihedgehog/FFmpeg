@@ -22,7 +22,7 @@
 
 #include <stdint.h>
 
-#include "libavutil/mem_internal.h"
+#include "libavutil/mem.h"
 
 #include "dca.h"
 #include "dcadata.h"
@@ -44,6 +44,19 @@ const uint8_t ff_dca_channels[16] = {
 
 const uint8_t ff_dca_dmix_primary_nch[8] = {
     1, 2, 2, 3, 3, 4, 4, 0
+};
+
+const uint8_t ff_dca_audio_mode_ch_mask[] = {
+    DCA_SPEAKER_LAYOUT_MONO,
+    DCA_SPEAKER_LAYOUT_STEREO,
+    DCA_SPEAKER_LAYOUT_STEREO,
+    DCA_SPEAKER_LAYOUT_STEREO,
+    DCA_SPEAKER_LAYOUT_STEREO,
+    DCA_SPEAKER_LAYOUT_3_0,
+    DCA_SPEAKER_LAYOUT_2_1,
+    DCA_SPEAKER_LAYOUT_3_1,
+    DCA_SPEAKER_LAYOUT_2_2,
+    DCA_SPEAKER_LAYOUT_5POINT0
 };
 
 const uint8_t ff_dca_quant_index_sel_nbits[DCA_CODE_BOOKS] = {

@@ -43,9 +43,6 @@ static int txd_decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
     int i, j;
     int ret;
 
-    if (avpkt->size < 88)
-        return AVERROR_INVALIDDATA;
-
     ff_texturedsp_init(&dxtc);
 
     bytestream2_init(&gb, avpkt->data, avpkt->size);
@@ -155,7 +152,7 @@ unsupported:
     return AVERROR_PATCHWELCOME;
 }
 
-const AVCodec ff_txd_decoder = {
+AVCodec ff_txd_decoder = {
     .name           = "txd",
     .long_name      = NULL_IF_CONFIG_SMALL("Renderware TXD (TeXture Dictionary) image"),
     .type           = AVMEDIA_TYPE_VIDEO,

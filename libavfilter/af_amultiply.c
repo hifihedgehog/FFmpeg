@@ -18,6 +18,7 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+#include "libavutil/avassert.h"
 #include "libavutil/channel_layout.h"
 #include "libavutil/common.h"
 #include "libavutil/float_dsp.h"
@@ -33,6 +34,7 @@ typedef struct AudioMultiplyContext {
     const AVClass *class;
 
     AVFrame *frames[2];
+    int64_t pts;
     int planes;
     int channels;
     int samples_align;
@@ -42,20 +44,33 @@ typedef struct AudioMultiplyContext {
 
 static int query_formats(AVFilterContext *ctx)
 {
+    AVFilterFormats *formats;
+    AVFilterChannelLayouts *layouts;
     static const enum AVSampleFormat sample_fmts[] = {
         AV_SAMPLE_FMT_FLT, AV_SAMPLE_FMT_FLTP,
         AV_SAMPLE_FMT_DBL, AV_SAMPLE_FMT_DBLP,
         AV_SAMPLE_FMT_NONE
     };
-    int ret = ff_set_common_all_channel_counts(ctx);
+    int ret;
+
+    layouts = ff_all_channel_counts();
+    if (!layouts)
+        return AVERROR(ENOMEM);
+    ret = ff_set_common_channel_layouts(ctx, layouts);
     if (ret < 0)
         return ret;
 
-    ret = ff_set_common_formats_from_list(ctx, sample_fmts);
+    formats = ff_make_format_list(sample_fmts);
+    if (!formats)
+        return AVERROR(ENOMEM);
+    ret = ff_set_common_formats(ctx, formats);
     if (ret < 0)
         return ret;
 
-    return ff_set_common_all_samplerates(ctx);
+    formats = ff_all_samplerates();
+    if (!formats)
+        return AVERROR(ENOMEM);
+    return ff_set_common_samplerates(ctx, formats);
 }
 
 static int activate(AVFilterContext *ctx)
@@ -80,20 +95,21 @@ static int activate(AVFilterContext *ctx)
         }
     }
 
-    if (s->frames[0] && s->frames[1]) {
+    if (nb_samples > 0 && s->frames[0] && s->frames[1]) {
         AVFrame *out;
         int plane_samples;
 
         if (av_sample_fmt_is_planar(ctx->inputs[0]->format))
-            plane_samples = FFALIGN(s->frames[0]->nb_samples, s->samples_align);
+            plane_samples = FFALIGN(nb_samples, s->samples_align);
         else
-            plane_samples = FFALIGN(s->frames[0]->nb_samples * s->channels, s->samples_align);
+            plane_samples = FFALIGN(nb_samples * s->channels, s->samples_align);
 
-        out = ff_get_audio_buffer(ctx->outputs[0], s->frames[0]->nb_samples);
+        out = ff_get_audio_buffer(ctx->outputs[0], nb_samples);
         if (!out)
             return AVERROR(ENOMEM);
 
-        out->pts = s->frames[0]->pts;
+        out->pts = s->pts;
+        s->pts += nb_samples;
 
         if (av_get_packed_sample_fmt(ctx->inputs[0]->format) == AV_SAMPLE_FMT_FLT) {
             for (i = 0; i < s->planes; i++) {
@@ -179,6 +195,7 @@ static const AVFilterPad inputs[] = {
         .name = "multiply1",
         .type = AVMEDIA_TYPE_AUDIO,
     },
+    { NULL }
 };
 
 static const AVFilterPad outputs[] = {
@@ -187,9 +204,10 @@ static const AVFilterPad outputs[] = {
         .type         = AVMEDIA_TYPE_AUDIO,
         .config_props = config_output,
     },
+    { NULL }
 };
 
-const AVFilter ff_af_amultiply = {
+AVFilter ff_af_amultiply = {
     .name           = "amultiply",
     .description    = NULL_IF_CONFIG_SMALL("Multiply two audio streams."),
     .priv_size      = sizeof(AudioMultiplyContext),
@@ -197,6 +215,6 @@ const AVFilter ff_af_amultiply = {
     .uninit         = uninit,
     .activate       = activate,
     .query_formats  = query_formats,
-    FILTER_INPUTS(inputs),
-    FILTER_OUTPUTS(outputs),
+    .inputs         = inputs,
+    .outputs        = outputs,
 };

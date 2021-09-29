@@ -29,6 +29,7 @@
  */
 
 #include "libavutil/opt.h"
+#include "libavutil/avassert.h"
 #include "libavutil/pixdesc.h"
 #include "internal.h"
 
@@ -346,7 +347,10 @@ static int query_formats(AVFilterContext *ctx)
         AV_PIX_FMT_0RGB32, AV_PIX_FMT_NONE,
     };
 
-    return ff_set_common_formats_from_list(ctx, pix_fmts);
+    AVFilterFormats *fmts_list = ff_make_format_list(pix_fmts);
+    if (!fmts_list)
+        return AVERROR(ENOMEM);
+    return ff_set_common_formats(ctx, fmts_list);
 }
 
 static int filter_frame(AVFilterLink *inlink, AVFrame *in)
@@ -367,8 +371,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
     td.in = in;
     td.out = out;
     td.rgbtoyuv = s->rgbtoyuv;
-    ff_filter_execute(ctx, s->func, &td, NULL,
-                      FFMIN(inlink->h, ff_filter_get_nb_threads(ctx)));
+    ctx->internal->execute(ctx, s->func, &td, NULL, FFMIN(inlink->h, ff_filter_get_nb_threads(ctx)));
 
     out->width  = outlink->w;
     out->height = outlink->h;
@@ -377,7 +380,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
     return ff_filter_frame(outlink, out);
 }
 
-static av_cold int init(AVFilterContext *ctx)
+static int init(AVFilterContext *ctx)
 {
     XBRContext *s = ctx->priv;
     static const xbrfunc_t xbrfuncs[] = {xbr2x, xbr3x, xbr4x};
@@ -392,7 +395,7 @@ static av_cold int init(AVFilterContext *ctx)
             int startg = FFMAX3(-bg, -rg, 0);
             int endg = FFMIN3(255-bg, 255-rg, 255);
             uint32_t y = (uint32_t)(( 299*rg + 1000*startg + 114*bg)/1000);
-            c = bg + rg * (1 << 16) + 0x010101 * startg;
+            c = bg + (rg<<16) + 0x010101 * startg;
             for (g = startg; g <= endg; g++) {
                 s->rgbtoyuv[c] = ((y++) << 16) + (u << 8) + v;
                 c+= 0x010101;
@@ -410,6 +413,7 @@ static const AVFilterPad xbr_inputs[] = {
         .type         = AVMEDIA_TYPE_VIDEO,
         .filter_frame = filter_frame,
     },
+    { NULL }
 };
 
 static const AVFilterPad xbr_outputs[] = {
@@ -418,13 +422,14 @@ static const AVFilterPad xbr_outputs[] = {
         .type         = AVMEDIA_TYPE_VIDEO,
         .config_props = config_output,
     },
+    { NULL }
 };
 
-const AVFilter ff_vf_xbr = {
+AVFilter ff_vf_xbr = {
     .name          = "xbr",
     .description   = NULL_IF_CONFIG_SMALL("Scale the input using xBR algorithm."),
-    FILTER_INPUTS(xbr_inputs),
-    FILTER_OUTPUTS(xbr_outputs),
+    .inputs        = xbr_inputs,
+    .outputs       = xbr_outputs,
     .query_formats = query_formats,
     .priv_size     = sizeof(XBRContext),
     .priv_class    = &xbr_class,

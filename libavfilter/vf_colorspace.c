@@ -24,7 +24,6 @@
  */
 
 #include "libavutil/avassert.h"
-#include "libavutil/mem_internal.h"
 #include "libavutil/opt.h"
 #include "libavutil/pixdesc.h"
 #include "libavutil/pixfmt.h"
@@ -180,7 +179,6 @@ static const struct TransferCharacteristics transfer_characteristics[AVCOL_TRC_N
     [AVCOL_TRC_GAMMA28]   = { 1.0,    0.0,    1.0 / 2.8, 0.0 },
     [AVCOL_TRC_SMPTE170M] = { 1.099,  0.018,  0.45, 4.5 },
     [AVCOL_TRC_SMPTE240M] = { 1.1115, 0.0228, 0.45, 4.0 },
-    [AVCOL_TRC_LINEAR]    = { 1.0,    0.0,    1.0,  0.0 },
     [AVCOL_TRC_IEC61966_2_1] = { 1.055, 0.0031308, 1.0 / 2.4, 12.92 },
     [AVCOL_TRC_IEC61966_2_4] = { 1.099, 0.018, 0.45, 4.5 },
     [AVCOL_TRC_BT2020_10] = { 1.099,  0.018,  0.45, 4.5 },
@@ -262,9 +260,9 @@ static int fill_gamma_table(ColorSpaceContext *s)
         s->delin_lut[n] = av_clip_int16(lrint(d * 28672.0));
 
         // linearize
-        if (v <= -in_beta * in_delta) {
+        if (v <= -in_beta) {
             l = -pow((1.0 - in_alpha - v) * in_ialpha, in_igamma);
-        } else if (v < in_beta * in_delta) {
+        } else if (v < in_beta) {
             l = v * in_idelta;
         } else {
             l = pow((v + in_alpha - 1.0) * in_ialpha, in_igamma);
@@ -333,15 +331,15 @@ static void apply_lut(int16_t *buf[3], ptrdiff_t stride,
     }
 }
 
-typedef struct ThreadData {
+struct ThreadData {
     AVFrame *in, *out;
     ptrdiff_t in_linesize[3], out_linesize[3];
     int in_ss_h, out_ss_h;
-} ThreadData;
+};
 
 static int convert(AVFilterContext *ctx, void *data, int job_nr, int n_jobs)
 {
-    const ThreadData *td = data;
+    struct ThreadData *td = data;
     ColorSpaceContext *s = ctx->priv;
     uint8_t *in_data[3], *out_data[3];
     int16_t *rgb[3];
@@ -413,30 +411,18 @@ static int get_range_off(AVFilterContext *ctx, int *off,
                          int *y_rng, int *uv_rng,
                          enum AVColorRange rng, int depth)
 {
-    switch (rng) {
-    case AVCOL_RANGE_UNSPECIFIED: {
+    if (rng == AVCOL_RANGE_UNSPECIFIED) {
         ColorSpaceContext *s = ctx->priv;
 
         if (!s->did_warn_range) {
             av_log(ctx, AV_LOG_WARNING, "Input range not set, assuming tv/mpeg\n");
             s->did_warn_range = 1;
         }
-    }
-        // fall-through
-    case AVCOL_RANGE_MPEG:
-        *off = 16 << (depth - 8);
-        *y_rng = 219 << (depth - 8);
-        *uv_rng = 224 << (depth - 8);
-        break;
-    case AVCOL_RANGE_JPEG:
-        *off = 0;
-        *y_rng = *uv_rng = (256 << (depth - 8)) - 1;
-        break;
-    default:
-        return AVERROR(EINVAL);
+
+        rng = AVCOL_RANGE_MPEG;
     }
 
-    return 0;
+    return ff_get_range_off(off, y_rng, uv_rng, rng, depth);
 }
 
 static int create_filtergraph(AVFilterContext *ctx,
@@ -642,7 +628,7 @@ static int create_filtergraph(AVFilterContext *ctx,
     if (!s->yuv2yuv_passthrough) {
         if (redo_yuv2rgb) {
             double rgb2yuv[3][3], (*yuv2rgb)[3] = s->yuv2rgb_dbl_coeffs;
-            int off, bits, in_rng;
+            int off;
 
             res = get_range_off(ctx, &off, &s->in_y_rng, &s->in_uv_rng,
                                 s->in_rng, in_desc->comp[0].depth);
@@ -656,18 +642,10 @@ static int create_filtergraph(AVFilterContext *ctx,
                 s->yuv_offset[0][n] = off;
             ff_fill_rgb2yuv_table(s->in_lumacoef, rgb2yuv);
             ff_matrix_invert_3x3(rgb2yuv, yuv2rgb);
-            bits = 1 << (in_desc->comp[0].depth - 1);
-            for (n = 0; n < 3; n++) {
-                for (in_rng = s->in_y_rng, m = 0; m < 3; m++, in_rng = s->in_uv_rng) {
-                    s->yuv2rgb_coeffs[n][m][0] = lrint(28672 * bits * yuv2rgb[n][m] / in_rng);
-                    for (o = 1; o < 8; o++)
-                        s->yuv2rgb_coeffs[n][m][o] = s->yuv2rgb_coeffs[n][m][0];
-                }
-            }
-            av_assert2(s->yuv2rgb_coeffs[0][1][0] == 0);
-            av_assert2(s->yuv2rgb_coeffs[2][2][0] == 0);
-            av_assert2(s->yuv2rgb_coeffs[0][0][0] == s->yuv2rgb_coeffs[1][0][0]);
-            av_assert2(s->yuv2rgb_coeffs[0][0][0] == s->yuv2rgb_coeffs[2][0][0]);
+
+            ff_get_yuv_coeffs(s->yuv2rgb_coeffs, yuv2rgb, in_desc->comp[0].depth,
+                              s->in_y_rng, s->in_uv_rng, 1);
+
             s->yuv2rgb = s->dsp.yuv2rgb[(in_desc->comp[0].depth - 8) >> 1]
                                        [in_desc->log2_chroma_h + in_desc->log2_chroma_w];
             emms = 1;
@@ -675,7 +653,7 @@ static int create_filtergraph(AVFilterContext *ctx,
 
         if (redo_rgb2yuv) {
             double (*rgb2yuv)[3] = s->rgb2yuv_dbl_coeffs;
-            int off, out_rng, bits;
+            int off;
 
             res = get_range_off(ctx, &off, &s->out_y_rng, &s->out_uv_rng,
                                 s->out_rng, out_desc->comp[0].depth);
@@ -688,15 +666,10 @@ static int create_filtergraph(AVFilterContext *ctx,
             for (n = 0; n < 8; n++)
                 s->yuv_offset[1][n] = off;
             ff_fill_rgb2yuv_table(s->out_lumacoef, rgb2yuv);
-            bits = 1 << (29 - out_desc->comp[0].depth);
-            for (out_rng = s->out_y_rng, n = 0; n < 3; n++, out_rng = s->out_uv_rng) {
-                for (m = 0; m < 3; m++) {
-                    s->rgb2yuv_coeffs[n][m][0] = lrint(bits * out_rng * rgb2yuv[n][m] / 28672);
-                    for (o = 1; o < 8; o++)
-                        s->rgb2yuv_coeffs[n][m][o] = s->rgb2yuv_coeffs[n][m][0];
-                }
-            }
-            av_assert2(s->rgb2yuv_coeffs[1][2][0] == s->rgb2yuv_coeffs[2][0][0]);
+
+            ff_get_yuv_coeffs(s->rgb2yuv_coeffs, rgb2yuv, out_desc->comp[0].depth,
+                              s->out_y_rng, s->out_uv_rng, 0);
+
             s->rgb2yuv = s->dsp.rgb2yuv[(out_desc->comp[0].depth - 8) >> 1]
                                        [out_desc->log2_chroma_h + out_desc->log2_chroma_w];
             s->rgb2yuv_fsb = s->dsp.rgb2yuv_fsb[(out_desc->comp[0].depth - 8) >> 1]
@@ -734,7 +707,7 @@ static int create_filtergraph(AVFilterContext *ctx,
     return 0;
 }
 
-static av_cold int init(AVFilterContext *ctx)
+static int init(AVFilterContext *ctx)
 {
     ColorSpaceContext *s = ctx->priv;
 
@@ -773,7 +746,7 @@ static int filter_frame(AVFilterLink *link, AVFrame *in)
     int res;
     ptrdiff_t rgb_stride = FFALIGN(in->width * sizeof(int16_t), 32);
     unsigned rgb_sz = rgb_stride * in->height;
-    ThreadData td;
+    struct ThreadData td;
 
     if (!out) {
         av_frame_free(&in);
@@ -782,7 +755,6 @@ static int filter_frame(AVFilterLink *link, AVFrame *in)
     res = av_frame_copy_props(out, in);
     if (res < 0) {
         av_frame_free(&in);
-        av_frame_free(&out);
         return res;
     }
 
@@ -842,18 +814,13 @@ static int filter_frame(AVFilterLink *link, AVFrame *in)
             !s->dither_scratch_base[1][0] || !s->dither_scratch_base[1][1] ||
             !s->dither_scratch_base[2][0] || !s->dither_scratch_base[2][1]) {
             uninit(ctx);
-            av_frame_free(&in);
-            av_frame_free(&out);
             return AVERROR(ENOMEM);
         }
         s->rgb_sz = rgb_sz;
     }
     res = create_filtergraph(ctx, in, out);
-    if (res < 0) {
-        av_frame_free(&in);
-        av_frame_free(&out);
+    if (res < 0)
         return res;
-    }
     s->rgb_stride = rgb_stride / sizeof(int16_t);
     td.in = in;
     td.out = out;
@@ -867,14 +834,11 @@ static int filter_frame(AVFilterLink *link, AVFrame *in)
     td.out_ss_h = av_pix_fmt_desc_get(out->format)->log2_chroma_h;
     if (s->yuv2yuv_passthrough) {
         res = av_frame_copy(out, in);
-        if (res < 0) {
-            av_frame_free(&in);
-            av_frame_free(&out);
+        if (res < 0)
             return res;
-        }
     } else {
-        ff_filter_execute(ctx, convert, &td, NULL,
-                          FFMIN((in->height + 1) >> 1, ff_filter_get_nb_threads(ctx)));
+        ctx->internal->execute(ctx, convert, &td, NULL,
+                               FFMIN((in->height + 1) >> 1, ff_filter_get_nb_threads(ctx)));
     }
     av_frame_free(&in);
 
@@ -898,7 +862,7 @@ static int query_formats(AVFilterContext *ctx)
         return AVERROR(ENOMEM);
     if (s->user_format == AV_PIX_FMT_NONE)
         return ff_set_common_formats(ctx, formats);
-    res = ff_formats_ref(formats, &ctx->inputs[0]->outcfg.formats);
+    res = ff_formats_ref(formats, &ctx->inputs[0]->out_formats);
     if (res < 0)
         return res;
     formats = NULL;
@@ -906,7 +870,7 @@ static int query_formats(AVFilterContext *ctx)
     if (res < 0)
         return res;
 
-    return ff_formats_ref(formats, &ctx->outputs[0]->incfg.formats);
+    return ff_formats_ref(formats, &ctx->outputs[0]->in_formats);
 }
 
 static int config_props(AVFilterLink *outlink)
@@ -980,7 +944,6 @@ static const AVOption colorspace_options[] = {
     ENUM("smpte432",     AVCOL_PRI_SMPTE432,   "prm"),
     ENUM("bt2020",       AVCOL_PRI_BT2020,     "prm"),
     ENUM("jedec-p22",    AVCOL_PRI_JEDEC_P22,  "prm"),
-    ENUM("ebu3213",      AVCOL_PRI_EBU3213,    "prm"),
 
     { "trc",        "Output transfer characteristics",
       OFFSET(user_trc),   AV_OPT_TYPE_INT, { .i64 = AVCOL_TRC_UNSPECIFIED },
@@ -992,7 +955,6 @@ static const AVOption colorspace_options[] = {
     ENUM("gamma28",      AVCOL_TRC_GAMMA28,      "trc"),
     ENUM("smpte170m",    AVCOL_TRC_SMPTE170M,    "trc"),
     ENUM("smpte240m",    AVCOL_TRC_SMPTE240M,    "trc"),
-    ENUM("linear",       AVCOL_TRC_LINEAR,       "trc"),
     ENUM("srgb",         AVCOL_TRC_IEC61966_2_1, "trc"),
     ENUM("iec61966-2-1", AVCOL_TRC_IEC61966_2_1, "trc"),
     ENUM("xvycc",        AVCOL_TRC_IEC61966_2_4, "trc"),
@@ -1057,6 +1019,7 @@ static const AVFilterPad inputs[] = {
         .type         = AVMEDIA_TYPE_VIDEO,
         .filter_frame = filter_frame,
     },
+    { NULL }
 };
 
 static const AVFilterPad outputs[] = {
@@ -1065,9 +1028,10 @@ static const AVFilterPad outputs[] = {
         .type         = AVMEDIA_TYPE_VIDEO,
         .config_props = config_props,
     },
+    { NULL }
 };
 
-const AVFilter ff_vf_colorspace = {
+AVFilter ff_vf_colorspace = {
     .name            = "colorspace",
     .description     = NULL_IF_CONFIG_SMALL("Convert between colorspaces."),
     .init            = init,
@@ -1075,7 +1039,7 @@ const AVFilter ff_vf_colorspace = {
     .query_formats   = query_formats,
     .priv_size       = sizeof(ColorSpaceContext),
     .priv_class      = &colorspace_class,
-    FILTER_INPUTS(inputs),
-    FILTER_OUTPUTS(outputs),
+    .inputs          = inputs,
+    .outputs         = outputs,
     .flags           = AVFILTER_FLAG_SUPPORT_TIMELINE_GENERIC | AVFILTER_FLAG_SLICE_THREADS,
 };

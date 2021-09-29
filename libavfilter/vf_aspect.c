@@ -78,7 +78,7 @@ static int filter_frame(AVFilterLink *link, AVFrame *frame)
 static inline void compute_dar(AVRational *dar, AVRational sar, int w, int h)
 {
     if (sar.num && sar.den) {
-        av_reduce(&dar->num, &dar->den, sar.num * (int64_t)w, sar.den * (int64_t)h, INT_MAX);
+        av_reduce(&dar->num, &dar->den, sar.num * w, sar.den * h, INT_MAX);
     } else {
         av_reduce(&dar->num, &dar->den, w, h, INT_MAX);
     }
@@ -173,6 +173,7 @@ static const AVFilterPad avfilter_vf_setdar_inputs[] = {
         .type         = AVMEDIA_TYPE_VIDEO,
         .filter_frame = filter_frame,
     },
+    { NULL }
 };
 
 static const AVFilterPad avfilter_vf_setdar_outputs[] = {
@@ -181,15 +182,16 @@ static const AVFilterPad avfilter_vf_setdar_outputs[] = {
         .type = AVMEDIA_TYPE_VIDEO,
         .config_props = setdar_config_props,
     },
+    { NULL }
 };
 
-const AVFilter ff_vf_setdar = {
+AVFilter ff_vf_setdar = {
     .name        = "setdar",
     .description = NULL_IF_CONFIG_SMALL("Set the frame display aspect ratio."),
     .priv_size   = sizeof(AspectContext),
     .priv_class  = &setdar_class,
-    FILTER_INPUTS(avfilter_vf_setdar_inputs),
-    FILTER_OUTPUTS(avfilter_vf_setdar_outputs),
+    .inputs      = avfilter_vf_setdar_inputs,
+    .outputs     = avfilter_vf_setdar_outputs,
 };
 
 #endif /* CONFIG_SETDAR_FILTER */
@@ -235,6 +237,7 @@ static const AVFilterPad avfilter_vf_setsar_inputs[] = {
         .type         = AVMEDIA_TYPE_VIDEO,
         .filter_frame = filter_frame,
     },
+    { NULL }
 };
 
 static const AVFilterPad avfilter_vf_setsar_outputs[] = {
@@ -243,15 +246,16 @@ static const AVFilterPad avfilter_vf_setsar_outputs[] = {
         .type = AVMEDIA_TYPE_VIDEO,
         .config_props = setsar_config_props,
     },
+    { NULL }
 };
 
-const AVFilter ff_vf_setsar = {
+AVFilter ff_vf_setsar = {
     .name        = "setsar",
     .description = NULL_IF_CONFIG_SMALL("Set the pixel sample aspect ratio."),
     .priv_size   = sizeof(AspectContext),
     .priv_class  = &setsar_class,
-    FILTER_INPUTS(avfilter_vf_setsar_inputs),
-    FILTER_OUTPUTS(avfilter_vf_setsar_outputs),
+    .inputs      = avfilter_vf_setsar_inputs,
+    .outputs     = avfilter_vf_setsar_outputs,
 };
 
 #endif /* CONFIG_SETSAR_FILTER */

@@ -33,7 +33,6 @@
 static int parse_mb_skip(Wmv2Context *w)
 {
     int mb_x, mb_y;
-    int coded_mb_count = 0;
     MpegEncContext *const s = &w->s;
     uint32_t *const mb_type = s->current_picture_ptr->mb_type;
 
@@ -84,14 +83,6 @@ static int parse_mb_skip(Wmv2Context *w)
         }
         break;
     }
-
-    for (mb_y = 0; mb_y < s->mb_height; mb_y++)
-        for (mb_x = 0; mb_x < s->mb_width; mb_x++)
-            coded_mb_count += !IS_SKIP(mb_type[mb_y * s->mb_stride + mb_x]);
-
-    if (coded_mb_count > get_bits_left(&s->gb))
-        return AVERROR_INVALIDDATA;
-
     return 0;
 }
 
@@ -278,16 +269,22 @@ int ff_wmv2_decode_secondary_picture_header(MpegEncContext *s)
     return 0;
 }
 
-static inline void wmv2_decode_motion(Wmv2Context *w, int *mx_ptr, int *my_ptr)
+static inline int wmv2_decode_motion(Wmv2Context *w, int *mx_ptr, int *my_ptr)
 {
     MpegEncContext *const s = &w->s;
+    int ret;
 
-    ff_msmpeg4_decode_motion(s, mx_ptr, my_ptr);
+    ret = ff_msmpeg4_decode_motion(s, mx_ptr, my_ptr);
+
+    if (ret < 0)
+        return ret;
 
     if ((((*mx_ptr) | (*my_ptr)) & 1) && s->mspel)
         w->hshift = get_bits1(&s->gb);
     else
         w->hshift = 0;
+
+    return 0;
 }
 
 static int16_t *wmv2_pred_motion(Wmv2Context *w, int *px, int *py)
@@ -403,6 +400,8 @@ int ff_wmv2_decode_mb(MpegEncContext *s, int16_t block[6][64])
 
         code = get_vlc2(&s->gb, ff_mb_non_intra_vlc[w->cbp_table_index].table,
                         MB_NON_INTRA_VLC_BITS, 3);
+        if (code < 0)
+            return AVERROR_INVALIDDATA;
         s->mb_intra = (~code & 0x40) >> 6;
 
         cbp = code & 0x3f;
@@ -411,6 +410,11 @@ int ff_wmv2_decode_mb(MpegEncContext *s, int16_t block[6][64])
         if (get_bits_left(&s->gb) <= 0)
             return AVERROR_INVALIDDATA;
         code = get_vlc2(&s->gb, ff_msmp4_mb_i_vlc.table, MB_INTRA_VLC_BITS, 2);
+        if (code < 0) {
+            av_log(s->avctx, AV_LOG_ERROR,
+                   "II-cbp illegal at %d %d\n", s->mb_x, s->mb_y);
+            return AVERROR_INVALIDDATA;
+        }
         /* predict coded block pattern */
         cbp = 0;
         for (i = 0; i < 6; i++) {
@@ -443,7 +447,8 @@ int ff_wmv2_decode_mb(MpegEncContext *s, int16_t block[6][64])
                 w->per_block_abt = 0;
         }
 
-        wmv2_decode_motion(w, &mx, &my);
+        if ((ret = wmv2_decode_motion(w, &mx, &my)) < 0)
+            return ret;
 
         s->mv_dir      = MV_DIR_FORWARD;
         s->mv_type     = MV_TYPE_16X16;
@@ -490,6 +495,7 @@ int ff_wmv2_decode_mb(MpegEncContext *s, int16_t block[6][64])
     return 0;
 }
 
+#if CONFIG_WMV2_DECODER
 static av_cold int wmv2_decode_init(AVCodecContext *avctx)
 {
     Wmv2Context *const w = avctx->priv_data;
@@ -513,7 +519,7 @@ static av_cold int wmv2_decode_end(AVCodecContext *avctx)
     return ff_h263_decode_end(avctx);
 }
 
-const AVCodec ff_wmv2_decoder = {
+AVCodec ff_wmv2_decoder = {
     .name           = "wmv2",
     .long_name      = NULL_IF_CONFIG_SMALL("Windows Media Video 8"),
     .type           = AVMEDIA_TYPE_VIDEO,
@@ -523,7 +529,7 @@ const AVCodec ff_wmv2_decoder = {
     .close          = wmv2_decode_end,
     .decode         = ff_h263_decode_frame,
     .capabilities   = AV_CODEC_CAP_DRAW_HORIZ_BAND | AV_CODEC_CAP_DR1,
-    .caps_internal  = FF_CODEC_CAP_INIT_CLEANUP,
     .pix_fmts       = (const enum AVPixelFormat[]) { AV_PIX_FMT_YUV420P,
                                                      AV_PIX_FMT_NONE },
 };
+#endif

@@ -26,8 +26,6 @@
 
 #define BITSTREAM_READER_LE
 
-#include "libavutil/mem_internal.h"
-
 #include "avcodec.h"
 #include "bytestream.h"
 #include "copy_block.h"
@@ -104,9 +102,6 @@ typedef struct AGMContext {
 static int read_code(GetBitContext *gb, int *oskip, int *level, int *map, int mode)
 {
     int len = 0, skip = 0, max;
-
-    if (get_bits_left(gb) < 2)
-        return AVERROR_INVALIDDATA;
 
     if (show_bits(gb, 2)) {
         switch (show_bits(gb, 4)) {
@@ -425,8 +420,8 @@ static int decode_inter_plane(AGMContext *s, GetBitContext *gb, int size,
                 int map = s->map[x];
 
                 if (orig_mv_x >= -32) {
-                    if (y * 8 + mv_y < 0 || y * 8 + mv_y + 8 > h ||
-                        x * 8 + mv_x < 0 || x * 8 + mv_x + 8 > w)
+                    if (y * 8 + mv_y < 0 || y * 8 + mv_y >= h ||
+                        x * 8 + mv_x < 0 || x * 8 + mv_x >= w)
                         return AVERROR_INVALIDDATA;
 
                     copy_block8(frame->data[plane] + (s->blocks_h - 1 - y) * 8 * frame->linesize[plane] + x * 8,
@@ -462,8 +457,8 @@ static int decode_inter_plane(AGMContext *s, GetBitContext *gb, int size,
                     return ret;
 
                 if (orig_mv_x >= -32) {
-                    if (y * 8 + mv_y < 0 || y * 8 + mv_y + 8 > h ||
-                        x * 8 + mv_x < 0 || x * 8 + mv_x + 8 > w)
+                    if (y * 8 + mv_y < 0 || y * 8 + mv_y >= h ||
+                        x * 8 + mv_x < 0 || x * 8 + mv_x >= w)
                         return AVERROR_INVALIDDATA;
 
                     copy_block8(frame->data[plane] + (s->blocks_h - 1 - y) * 8 * frame->linesize[plane] + x * 8,
@@ -575,16 +570,13 @@ static int decode_raw_intra_rgb(AVCodecContext *avctx, GetByteContext *gbyte, AV
     uint8_t *dst = frame->data[0] + (avctx->height - 1) * frame->linesize[0];
     uint8_t r = 0, g = 0, b = 0;
 
-    if (bytestream2_get_bytes_left(gbyte) < 3 * avctx->width * avctx->height)
-        return AVERROR_INVALIDDATA;
-
     for (int y = 0; y < avctx->height; y++) {
         for (int x = 0; x < avctx->width; x++) {
-            dst[x*3+0] = bytestream2_get_byteu(gbyte) + r;
+            dst[x*3+0] = bytestream2_get_byte(gbyte) + r;
             r = dst[x*3+0];
-            dst[x*3+1] = bytestream2_get_byteu(gbyte) + g;
+            dst[x*3+1] = bytestream2_get_byte(gbyte) + g;
             g = dst[x*3+1];
-            dst[x*3+2] = bytestream2_get_byteu(gbyte) + b;
+            dst[x*3+2] = bytestream2_get_byte(gbyte) + b;
             b = dst[x*3+2];
         }
         dst -= frame->linesize[0];
@@ -593,7 +585,7 @@ static int decode_raw_intra_rgb(AVCodecContext *avctx, GetByteContext *gbyte, AV
     return 0;
 }
 
-av_always_inline static int fill_pixels(uint8_t **y0, uint8_t **y1,
+static int fill_pixels(uint8_t **y0, uint8_t **y1,
                        uint8_t **u, uint8_t **v,
                        int ylinesize, int ulinesize, int vlinesize,
                        uint8_t *fill,
@@ -832,7 +824,7 @@ static int decode_intra(AVCodecContext *avctx, GetBitContext *gb, AVFrame *frame
 static int decode_motion_vectors(AVCodecContext *avctx, GetBitContext *gb)
 {
     AGMContext *s = avctx->priv_data;
-    int nb_mvs = ((avctx->coded_height + 15) >> 4) * ((avctx->coded_width + 15) >> 4);
+    int nb_mvs = ((avctx->height + 15) >> 4) * ((avctx->width + 15) >> 4);
     int ret, skip = 0, value, map;
 
     av_fast_padded_malloc(&s->mvectors, &s->mvectors_size,
@@ -923,7 +915,7 @@ static void get_tree_codes(uint32_t *codes, Node *nodes, int idx, uint32_t pfx, 
         codes[idx] = pfx;
     } else if (idx >= 0) {
         get_tree_codes(codes, nodes, nodes[idx].child[0], pfx + (0 << bitpos), bitpos + 1);
-        get_tree_codes(codes, nodes, nodes[idx].child[1], pfx + (1U << bitpos), bitpos + 1);
+        get_tree_codes(codes, nodes, nodes[idx].child[1], pfx + (1 << bitpos), bitpos + 1);
     }
 }
 
@@ -1054,9 +1046,6 @@ static int decode_huffman2(AVCodecContext *avctx, int header, int size)
 
     s->output_size = get_bits_long(gb, 32);
 
-    if (s->output_size > avctx->width * avctx->height * 9LL + 10000)
-        return AVERROR_INVALIDDATA;
-
     av_fast_padded_malloc(&s->output, &s->padded_output_size, s->output_size);
     if (!s->output)
         return AVERROR(ENOMEM);
@@ -1121,13 +1110,6 @@ static int decode_frame(AVCodecContext *avctx, void *data,
     s->key_frame = (avpkt->flags & AV_PKT_FLAG_KEY);
     frame->key_frame = s->key_frame;
     frame->pict_type = s->key_frame ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_P;
-
-    if (!s->key_frame) {
-        if (!s->prev_frame->data[0]) {
-            av_log(avctx, AV_LOG_ERROR, "Missing reference frame.\n");
-            return AVERROR_INVALIDDATA;
-        }
-    }
 
     if (header) {
         if (avctx->codec_tag == MKTAG('A', 'G', 'M', '0') ||
@@ -1198,6 +1180,10 @@ static int decode_frame(AVCodecContext *avctx, void *data,
         else
             ret = decode_intra(avctx, gb, frame);
     } else {
+        if (!s->prev_frame->data[0]) {
+            av_log(avctx, AV_LOG_ERROR, "Missing reference frame.\n");
+            return AVERROR_INVALIDDATA;
+        }
         if (s->prev_frame-> width != frame->width ||
             s->prev_frame->height != frame->height)
             return AVERROR_INVALIDDATA;
@@ -1244,11 +1230,6 @@ static av_cold int decode_init(AVCodecContext *avctx)
     s->dct = avctx->codec_tag != MKTAG('A', 'G', 'M', '4') &&
              avctx->codec_tag != MKTAG('A', 'G', 'M', '5');
 
-    if (!s->rgb && !s->dct) {
-        if ((avctx->width & 1) || (avctx->height & 1))
-            return AVERROR_INVALIDDATA;
-    }
-
     avctx->idct_algo = FF_IDCT_SIMPLE;
     ff_idctdsp_init(&s->idsp, avctx);
     ff_init_scantable(s->idsp.idct_permutation, &s->scantable, ff_zigzag_direct);
@@ -1285,7 +1266,7 @@ static av_cold int decode_close(AVCodecContext *avctx)
     return 0;
 }
 
-const AVCodec ff_agm_decoder = {
+AVCodec ff_agm_decoder = {
     .name             = "agm",
     .long_name        = NULL_IF_CONFIG_SMALL("Amuse Graphics Movie"),
     .type             = AVMEDIA_TYPE_VIDEO,

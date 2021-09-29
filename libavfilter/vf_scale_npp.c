@@ -37,7 +37,7 @@
 #include "avfilter.h"
 #include "formats.h"
 #include "internal.h"
-#include "scale_eval.h"
+#include "scale.h"
 #include "video.h"
 
 #define CHECK_CU(x) FF_CUDA_CHECK_DL(ctx, device_hwctx->internal->cuda_dl, x)
@@ -98,9 +98,6 @@ typedef struct NPPScaleContext {
     char *h_expr;               ///< height expression string
     char *format_str;
 
-    int force_original_aspect_ratio;
-    int force_divisible_by;
-
     int interp_algo;
 } NPPScaleContext;
 
@@ -148,7 +145,9 @@ static int nppscale_query_formats(AVFilterContext *ctx)
     static const enum AVPixelFormat pixel_formats[] = {
         AV_PIX_FMT_CUDA, AV_PIX_FMT_NONE,
     };
-    return ff_set_common_formats_from_list(ctx, pixel_formats);
+    AVFilterFormats *pix_fmts = ff_make_format_list(pixel_formats);
+
+    return ff_set_common_formats(ctx, pix_fmts);
 }
 
 static int init_stage(NPPScaleStageContext *stage, AVBufferRef *device_ctx)
@@ -347,9 +346,6 @@ static int nppscale_config_props(AVFilterLink *outlink)
                                         inlink, outlink,
                                         &w, &h)) < 0)
         goto fail;
-
-    ff_scale_adjust_dimensions(inlink, &w, &h,
-                               s->force_original_aspect_ratio, s->force_divisible_by);
 
     if (((int64_t)h * inlink->w) > INT_MAX  ||
         ((int64_t)w * inlink->h) > INT_MAX)
@@ -556,11 +552,6 @@ static const AVOption options[] = {
         { "cubic2p_b05c03",     "2-parameter cubic (B=1/2, C=3/10)", 0, AV_OPT_TYPE_CONST, { .i64 = NPPI_INTER_CUBIC2P_B05C03     }, 0, 0, FLAGS, "interp_algo" },
         { "super",              "supersampling",                     0, AV_OPT_TYPE_CONST, { .i64 = NPPI_INTER_SUPER              }, 0, 0, FLAGS, "interp_algo" },
         { "lanczos",            "Lanczos",                           0, AV_OPT_TYPE_CONST, { .i64 = NPPI_INTER_LANCZOS            }, 0, 0, FLAGS, "interp_algo" },
-    { "force_original_aspect_ratio", "decrease or increase w/h if necessary to keep the original AR", OFFSET(force_original_aspect_ratio), AV_OPT_TYPE_INT, { .i64 = 0}, 0, 2, FLAGS, "force_oar" },
-    { "disable",  NULL, 0, AV_OPT_TYPE_CONST, {.i64 = 0 }, 0, 0, FLAGS, "force_oar" },
-    { "decrease", NULL, 0, AV_OPT_TYPE_CONST, {.i64 = 1 }, 0, 0, FLAGS, "force_oar" },
-    { "increase", NULL, 0, AV_OPT_TYPE_CONST, {.i64 = 2 }, 0, 0, FLAGS, "force_oar" },
-    { "force_divisible_by", "enforce that the output resolution is divisible by a defined integer when force_original_aspect_ratio is used", OFFSET(force_divisible_by), AV_OPT_TYPE_INT, { .i64 = 1}, 1, 256, FLAGS },
     { NULL },
 };
 
@@ -577,6 +568,7 @@ static const AVFilterPad nppscale_inputs[] = {
         .type        = AVMEDIA_TYPE_VIDEO,
         .filter_frame = nppscale_filter_frame,
     },
+    { NULL }
 };
 
 static const AVFilterPad nppscale_outputs[] = {
@@ -585,9 +577,10 @@ static const AVFilterPad nppscale_outputs[] = {
         .type         = AVMEDIA_TYPE_VIDEO,
         .config_props = nppscale_config_props,
     },
+    { NULL }
 };
 
-const AVFilter ff_vf_scale_npp = {
+AVFilter ff_vf_scale_npp = {
     .name      = "scale_npp",
     .description = NULL_IF_CONFIG_SMALL("NVIDIA Performance Primitives video "
                                         "scaling and format conversion"),
@@ -599,8 +592,8 @@ const AVFilter ff_vf_scale_npp = {
     .priv_size = sizeof(NPPScaleContext),
     .priv_class = &nppscale_class,
 
-    FILTER_INPUTS(nppscale_inputs),
-    FILTER_OUTPUTS(nppscale_outputs),
+    .inputs    = nppscale_inputs,
+    .outputs   = nppscale_outputs,
 
     .flags_internal = FF_FILTER_FLAG_HWFRAME_AWARE,
 };

@@ -22,7 +22,6 @@
 #include "libavutil/intreadwrite.h"
 #include "libavutil/intfloat.h"
 #include "avformat.h"
-#include "avio_internal.h"
 #include "internal.h"
 
 typedef struct ThpDemuxContext {
@@ -66,7 +65,6 @@ static int thp_read_header(AVFormatContext *s)
     AVStream *st;
     AVIOContext *pb = s->pb;
     int64_t fsize= avio_size(pb);
-    uint32_t maxsize;
     int i;
 
     /* Read the file header.  */
@@ -77,14 +75,11 @@ static int thp_read_header(AVFormatContext *s)
                            avio_rb32(pb); /* Max samples.  */
 
     thp->fps             = av_d2q(av_int2float(avio_rb32(pb)), INT_MAX);
-    if (thp->fps.den <= 0 || thp->fps.num < 0)
-        return AVERROR_INVALIDDATA;
     thp->framecnt        = avio_rb32(pb);
     thp->first_framesz   = avio_rb32(pb);
-    maxsize              = avio_rb32(pb);
-    if (fsize > 0 && (!maxsize || fsize < maxsize))
-        maxsize = fsize;
-    ffiocontext(pb)->maxsize = fsize;
+    pb->maxsize          = avio_rb32(pb);
+    if(fsize>0 && (!pb->maxsize || fsize < pb->maxsize))
+        pb->maxsize= fsize;
 
     thp->compoff         = avio_rb32(pb);
                            avio_rb32(pb); /* offsetDataOffset.  */
@@ -97,9 +92,6 @@ static int thp_read_header(AVFormatContext *s)
     /* Read the component structure.  */
     avio_seek (pb, thp->compoff, SEEK_SET);
     thp->compcount       = avio_rb32(pb);
-
-    if (thp->compcount > FF_ARRAY_ELEMS(thp->components))
-        return AVERROR_INVALIDDATA;
 
     /* Read the list of component types.  */
     avio_read(pb, thp->components, 16);
@@ -153,9 +145,6 @@ static int thp_read_header(AVFormatContext *s)
         }
     }
 
-    if (!thp->vst)
-        return AVERROR_INVALIDDATA;
-
     return 0;
 }
 
@@ -192,6 +181,7 @@ static int thp_read_packet(AVFormatContext *s,
         if (ret < 0)
             return ret;
         if (ret != size) {
+            av_packet_unref(pkt);
             return AVERROR(EIO);
         }
 
@@ -201,6 +191,7 @@ static int thp_read_packet(AVFormatContext *s,
         if (ret < 0)
             return ret;
         if (ret != thp->audiosize) {
+            av_packet_unref(pkt);
             return AVERROR(EIO);
         }
 
@@ -215,7 +206,7 @@ static int thp_read_packet(AVFormatContext *s,
     return 0;
 }
 
-const AVInputFormat ff_thp_demuxer = {
+AVInputFormat ff_thp_demuxer = {
     .name           = "thp",
     .long_name      = NULL_IF_CONFIG_SMALL("THP"),
     .priv_data_size = sizeof(ThpDemuxContext),

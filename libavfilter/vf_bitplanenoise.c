@@ -67,7 +67,10 @@ static int query_formats(AVFilterContext *ctx)
         AV_PIX_FMT_NONE
     };
 
-    return ff_set_common_formats_from_list(ctx, pixfmts);
+    AVFilterFormats *formats = ff_make_format_list(pixfmts);
+    if (!formats)
+        return AVERROR(ENOMEM);
+    return ff_set_common_formats(ctx, formats);
 }
 
 static int config_input(AVFilterLink *inlink)
@@ -119,7 +122,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
 
     if (s->depth <= 8) {
         for (plane = 0; plane < s->nb_planes; plane++) {
-            const int linesize = s->planeheight[plane] > 1 ? in->linesize[plane] : 0;
+            const int linesize = in->linesize[plane];
             const int dlinesize = out->linesize[plane];
             uint8_t *val = in->data[plane];
             uint8_t *dst = s->filter ? out->data[plane]: NULL;
@@ -148,7 +151,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
         }
     } else {
         for (plane = 0; plane < s->nb_planes; plane++) {
-            const int linesize = s->planeheight[plane] > 1 ? in->linesize[plane] / 2 : 0;
+            const int linesize = in->linesize[plane] / 2;
             const int dlinesize = out->linesize[plane] / 2;
             uint16_t *val = (uint16_t *)in->data[plane];
             uint16_t *dst = s->filter ? (uint16_t *)out->data[plane] : NULL;
@@ -200,6 +203,7 @@ static const AVFilterPad inputs[] = {
         .filter_frame   = filter_frame,
         .config_props   = config_input,
     },
+    { NULL }
 };
 
 static const AVFilterPad outputs[] = {
@@ -207,15 +211,16 @@ static const AVFilterPad outputs[] = {
         .name = "default",
         .type = AVMEDIA_TYPE_VIDEO,
     },
+    { NULL }
 };
 
-const AVFilter ff_vf_bitplanenoise = {
+AVFilter ff_vf_bitplanenoise = {
     .name           = "bitplanenoise",
     .description    = NULL_IF_CONFIG_SMALL("Measure bit plane noise."),
     .priv_size      = sizeof(BPNContext),
     .query_formats  = query_formats,
-    FILTER_INPUTS(inputs),
-    FILTER_OUTPUTS(outputs),
+    .inputs         = inputs,
+    .outputs        = outputs,
     .priv_class     = &bitplanenoise_class,
     .flags          = AVFILTER_FLAG_SUPPORT_TIMELINE_GENERIC,
 };

@@ -22,9 +22,7 @@
 #include "libavutil/opt.h"
 #include "avfilter.h"
 #include "audio.h"
-#include "filters.h"
 #include "formats.h"
-#include "internal.h"
 
 typedef struct DeclickChannel {
     double *auxiliary;
@@ -63,7 +61,6 @@ typedef struct AudioDeclickContext {
     int hop_size;
     int overlap_skip;
 
-    AVFrame *enabled;
     AVFrame *in;
     AVFrame *out;
     AVFrame *buffer;
@@ -76,9 +73,7 @@ typedef struct AudioDeclickContext {
     uint64_t nb_samples;
     uint64_t detected_errors;
     int samples_left;
-    int eof;
 
-    AVAudioFifo *efifo;
     AVAudioFifo *fifo;
     double *window_func_lut;
 
@@ -92,21 +87,13 @@ typedef struct AudioDeclickContext {
 #define AF AV_OPT_FLAG_AUDIO_PARAM|AV_OPT_FLAG_FILTERING_PARAM
 
 static const AVOption adeclick_options[] = {
-    { "window", "set window size",     OFFSET(w),         AV_OPT_TYPE_DOUBLE, {.dbl=55}, 10,  100, AF },
     { "w", "set window size",          OFFSET(w),         AV_OPT_TYPE_DOUBLE, {.dbl=55}, 10,  100, AF },
-    { "overlap", "set window overlap", OFFSET(overlap),   AV_OPT_TYPE_DOUBLE, {.dbl=75}, 50,   95, AF },
     { "o", "set window overlap",       OFFSET(overlap),   AV_OPT_TYPE_DOUBLE, {.dbl=75}, 50,   95, AF },
-    { "arorder", "set autoregression order", OFFSET(ar),  AV_OPT_TYPE_DOUBLE, {.dbl=2},   0,   25, AF },
     { "a", "set autoregression order", OFFSET(ar),        AV_OPT_TYPE_DOUBLE, {.dbl=2},   0,   25, AF },
-    { "threshold", "set threshold",    OFFSET(threshold), AV_OPT_TYPE_DOUBLE, {.dbl=2},   1,  100, AF },
     { "t", "set threshold",            OFFSET(threshold), AV_OPT_TYPE_DOUBLE, {.dbl=2},   1,  100, AF },
-    { "burst", "set burst fusion",     OFFSET(burst),     AV_OPT_TYPE_DOUBLE, {.dbl=2},   0,   10, AF },
     { "b", "set burst fusion",         OFFSET(burst),     AV_OPT_TYPE_DOUBLE, {.dbl=2},   0,   10, AF },
-    { "method", "set overlap method",  OFFSET(method),    AV_OPT_TYPE_INT,    {.i64=0},   0,    1, AF, "m" },
     { "m", "set overlap method",       OFFSET(method),    AV_OPT_TYPE_INT,    {.i64=0},   0,    1, AF, "m" },
-    { "add", "overlap-add",            0,                 AV_OPT_TYPE_CONST,  {.i64=0},   0,    0, AF, "m" },
     { "a", "overlap-add",              0,                 AV_OPT_TYPE_CONST,  {.i64=0},   0,    0, AF, "m" },
-    { "save", "overlap-save",          0,                 AV_OPT_TYPE_CONST,  {.i64=1},   0,    0, AF, "m" },
     { "s", "overlap-save",             0,                 AV_OPT_TYPE_CONST,  {.i64=1},   0,    0, AF, "m" },
     { NULL }
 };
@@ -115,21 +102,31 @@ AVFILTER_DEFINE_CLASS(adeclick);
 
 static int query_formats(AVFilterContext *ctx)
 {
+    AVFilterFormats *formats = NULL;
+    AVFilterChannelLayouts *layouts = NULL;
     static const enum AVSampleFormat sample_fmts[] = {
         AV_SAMPLE_FMT_DBLP,
         AV_SAMPLE_FMT_NONE
     };
     int ret;
 
-    ret = ff_set_common_formats_from_list(ctx, sample_fmts);
+    formats = ff_make_format_list(sample_fmts);
+    if (!formats)
+        return AVERROR(ENOMEM);
+    ret = ff_set_common_formats(ctx, formats);
     if (ret < 0)
         return ret;
 
-    ret = ff_set_common_all_channel_counts(ctx);
+    layouts = ff_all_channel_counts();
+    if (!layouts)
+        return AVERROR(ENOMEM);
+
+    ret = ff_set_common_channel_layouts(ctx, layouts);
     if (ret < 0)
         return ret;
 
-    return ff_set_common_all_samplerates(ctx);
+    formats = ff_all_samplerates();
+    return ff_set_common_samplerates(ctx, formats);
 }
 
 static int config_input(AVFilterLink *inlink)
@@ -159,17 +156,13 @@ static int config_input(AVFilterLink *inlink)
     av_frame_free(&s->out);
     av_frame_free(&s->buffer);
     av_frame_free(&s->is);
-    s->enabled = ff_get_audio_buffer(inlink, s->window_size);
     s->in = ff_get_audio_buffer(inlink, s->window_size);
     s->out = ff_get_audio_buffer(inlink, s->window_size);
     s->buffer = ff_get_audio_buffer(inlink, s->window_size * 2);
     s->is = ff_get_audio_buffer(inlink, s->window_size);
-    if (!s->in || !s->out || !s->buffer || !s->is || !s->enabled)
+    if (!s->in || !s->out || !s->buffer || !s->is)
         return AVERROR(ENOMEM);
 
-    s->efifo = av_audio_fifo_alloc(inlink->format, 1, s->window_size);
-    if (!s->efifo)
-        return AVERROR(ENOMEM);
     s->fifo = av_audio_fifo_alloc(inlink->format, inlink->channels, s->window_size);
     if (!s->fifo)
         return AVERROR(ENOMEM);
@@ -517,20 +510,14 @@ static int filter_channel(AVFilterContext *ctx, void *arg, int ch, int nb_jobs)
         nb_errors = s->detector(s, c, sigmae, c->detection, c->acoefficients,
                                 c->click, index, src, dst);
         if (nb_errors > 0) {
-            double *enabled = (double *)s->enabled->extended_data[0];
-
             ret = interpolation(c, src, s->ar_order, c->acoefficients, index,
                                 nb_errors, c->auxiliary, interpolated);
             if (ret < 0)
                 return ret;
 
-            av_audio_fifo_peek(s->efifo, (void**)s->enabled->extended_data, s->window_size);
-
             for (j = 0; j < nb_errors; j++) {
-                if (enabled[index[j]]) {
-                    dst[index[j]] = interpolated[j];
-                    is[index[j]] = 1;
-                }
+                dst[index[j]] = interpolated[j];
+                is[index[j]] = 1;
             }
         }
     } else {
@@ -557,58 +544,68 @@ static int filter_channel(AVFilterContext *ctx, void *arg, int ch, int nb_jobs)
     return 0;
 }
 
-static int filter_frame(AVFilterLink *inlink)
+static int filter_frame(AVFilterLink *inlink, AVFrame *in)
 {
     AVFilterContext *ctx = inlink->dst;
     AVFilterLink *outlink = ctx->outputs[0];
     AudioDeclickContext *s = ctx->priv;
     AVFrame *out = NULL;
-    int ret = 0, j, ch, detected_errors = 0;
-    ThreadData td;
+    int ret = 0;
 
-    out = ff_get_audio_buffer(outlink, s->hop_size);
-    if (!out)
-        return AVERROR(ENOMEM);
+    if (s->pts == AV_NOPTS_VALUE)
+        s->pts = in->pts;
 
-    ret = av_audio_fifo_peek(s->fifo, (void **)s->in->extended_data,
-                             s->window_size);
-    if (ret < 0)
-        goto fail;
+    ret = av_audio_fifo_write(s->fifo, (void **)in->extended_data,
+                              in->nb_samples);
+    av_frame_free(&in);
 
-    td.out = out;
-    ret = ff_filter_execute(ctx, filter_channel, &td, NULL, inlink->channels);
-    if (ret < 0)
-        goto fail;
+    while (av_audio_fifo_size(s->fifo) >= s->window_size) {
+        int j, ch, detected_errors = 0;
+        ThreadData td;
 
-    for (ch = 0; ch < s->in->channels; ch++) {
-        double *is = (double *)s->is->extended_data[ch];
+        out = ff_get_audio_buffer(outlink, s->hop_size);
+        if (!out)
+            return AVERROR(ENOMEM);
 
-        for (j = 0; j < s->hop_size; j++) {
-            if (is[j])
-                detected_errors++;
+        ret = av_audio_fifo_peek(s->fifo, (void **)s->in->extended_data,
+                                 s->window_size);
+        if (ret < 0)
+            break;
+
+        td.out = out;
+        ret = ctx->internal->execute(ctx, filter_channel, &td, NULL, inlink->channels);
+        if (ret < 0)
+            goto fail;
+
+        for (ch = 0; ch < s->in->channels; ch++) {
+            double *is = (double *)s->is->extended_data[ch];
+
+            for (j = 0; j < s->hop_size; j++) {
+                if (is[j])
+                    detected_errors++;
+            }
         }
-    }
 
-    av_audio_fifo_drain(s->fifo, s->hop_size);
-    av_audio_fifo_drain(s->efifo, s->hop_size);
+        av_audio_fifo_drain(s->fifo, s->hop_size);
 
-    if (s->samples_left > 0)
-        out->nb_samples = FFMIN(s->hop_size, s->samples_left);
+        if (s->samples_left > 0)
+            out->nb_samples = FFMIN(s->hop_size, s->samples_left);
 
-    out->pts = s->pts;
-    s->pts += av_rescale_q(s->hop_size, (AVRational){1, outlink->sample_rate}, outlink->time_base);
+        out->pts = s->pts;
+        s->pts += s->hop_size;
 
-    s->detected_errors += detected_errors;
-    s->nb_samples += out->nb_samples * inlink->channels;
+        s->detected_errors += detected_errors;
+        s->nb_samples += out->nb_samples * inlink->channels;
 
-    ret = ff_filter_frame(outlink, out);
-    if (ret < 0)
-        return ret;
+        ret = ff_filter_frame(outlink, out);
+        if (ret < 0)
+            break;
 
-    if (s->samples_left > 0) {
-        s->samples_left -= s->hop_size;
-        if (s->samples_left <= 0)
-            av_audio_fifo_drain(s->fifo, av_audio_fifo_size(s->fifo));
+        if (s->samples_left > 0) {
+            s->samples_left -= s->hop_size;
+            if (s->samples_left <= 0)
+                av_audio_fifo_drain(s->fifo, av_audio_fifo_size(s->fifo));
+        }
     }
 
 fail:
@@ -617,64 +614,27 @@ fail:
     return ret;
 }
 
-static int activate(AVFilterContext *ctx)
+static int request_frame(AVFilterLink *outlink)
 {
-    AVFilterLink *inlink = ctx->inputs[0];
-    AVFilterLink *outlink = ctx->outputs[0];
+    AVFilterContext *ctx = outlink->src;
     AudioDeclickContext *s = ctx->priv;
-    AVFrame *in;
-    int ret, status;
-    int64_t pts;
+    int ret = 0;
 
-    FF_FILTER_FORWARD_STATUS_BACK(outlink, inlink);
+    ret = ff_request_frame(ctx->inputs[0]);
 
-    ret = ff_inlink_consume_samples(inlink, s->window_size, s->window_size, &in);
-    if (ret < 0)
-        return ret;
-    if (ret > 0) {
-        double *e = (double *)s->enabled->extended_data[0];
-
-        if (s->pts == AV_NOPTS_VALUE)
-            s->pts = in->pts;
-
-        ret = av_audio_fifo_write(s->fifo, (void **)in->extended_data,
-                                  in->nb_samples);
-        for (int i = 0; i < in->nb_samples; i++)
-            e[i] = !ctx->is_disabled;
-
-        av_audio_fifo_write(s->efifo, (void**)s->enabled->extended_data, in->nb_samples);
-        av_frame_free(&in);
-        if (ret < 0)
-            return ret;
-    }
-
-    if (av_audio_fifo_size(s->fifo) >= s->window_size ||
-        s->samples_left > 0)
-        return filter_frame(inlink);
-
-    if (av_audio_fifo_size(s->fifo) >= s->window_size) {
-        ff_filter_set_ready(ctx, 100);
-        return 0;
-    }
-
-    if (!s->eof && ff_inlink_acknowledge_status(inlink, &status, &pts)) {
-        if (status == AVERROR_EOF) {
-            s->eof = 1;
+    if (ret == AVERROR_EOF && av_audio_fifo_size(s->fifo) > 0) {
+        if (!s->samples_left)
             s->samples_left = av_audio_fifo_size(s->fifo) - s->overlap_skip;
-            ff_filter_set_ready(ctx, 100);
-            return 0;
+
+        if (s->samples_left > 0) {
+            AVFrame *in = ff_get_audio_buffer(outlink, s->window_size - s->samples_left);
+            if (!in)
+                return AVERROR(ENOMEM);
+            ret = filter_frame(ctx->inputs[0], in);
         }
     }
 
-    if (s->eof && s->samples_left <= 0) {
-        ff_outlink_set_status(outlink, AVERROR_EOF, s->pts);
-        return 0;
-    }
-
-    if (!s->eof)
-        FF_FILTER_FORWARD_WANTED(outlink, inlink);
-
-    return FFERROR_NOT_READY;
+    return ret;
 }
 
 static av_cold int init(AVFilterContext *ctx)
@@ -701,9 +661,7 @@ static av_cold void uninit(AVFilterContext *ctx)
            s->nb_samples, 100. * s->detected_errors / s->nb_samples);
 
     av_audio_fifo_free(s->fifo);
-    av_audio_fifo_free(s->efifo);
     av_freep(&s->window_func_lut);
-    av_frame_free(&s->enabled);
     av_frame_free(&s->in);
     av_frame_free(&s->out);
     av_frame_free(&s->buffer);
@@ -739,63 +697,57 @@ static const AVFilterPad inputs[] = {
     {
         .name         = "default",
         .type         = AVMEDIA_TYPE_AUDIO,
+        .filter_frame = filter_frame,
         .config_props = config_input,
     },
+    { NULL }
 };
 
 static const AVFilterPad outputs[] = {
     {
         .name          = "default",
         .type          = AVMEDIA_TYPE_AUDIO,
+        .request_frame = request_frame,
     },
+    { NULL }
 };
 
-const AVFilter ff_af_adeclick = {
+AVFilter ff_af_adeclick = {
     .name          = "adeclick",
     .description   = NULL_IF_CONFIG_SMALL("Remove impulsive noise from input audio."),
     .query_formats = query_formats,
     .priv_size     = sizeof(AudioDeclickContext),
     .priv_class    = &adeclick_class,
     .init          = init,
-    .activate      = activate,
     .uninit        = uninit,
-    FILTER_INPUTS(inputs),
-    FILTER_OUTPUTS(outputs),
-    .flags         = AVFILTER_FLAG_SLICE_THREADS | AVFILTER_FLAG_SUPPORT_TIMELINE_INTERNAL,
+    .inputs        = inputs,
+    .outputs       = outputs,
+    .flags         = AVFILTER_FLAG_SLICE_THREADS,
 };
 
 static const AVOption adeclip_options[] = {
-    { "window", "set window size",     OFFSET(w),         AV_OPT_TYPE_DOUBLE, {.dbl=55},     10,  100, AF },
-    { "w", "set window size",          OFFSET(w),         AV_OPT_TYPE_DOUBLE, {.dbl=55},     10,  100, AF },
-    { "overlap", "set window overlap", OFFSET(overlap),   AV_OPT_TYPE_DOUBLE, {.dbl=75},     50,   95, AF },
-    { "o", "set window overlap",       OFFSET(overlap),   AV_OPT_TYPE_DOUBLE, {.dbl=75},     50,   95, AF },
-    { "arorder", "set autoregression order", OFFSET(ar),  AV_OPT_TYPE_DOUBLE, {.dbl=8},       0,   25, AF },
-    { "a", "set autoregression order", OFFSET(ar),        AV_OPT_TYPE_DOUBLE, {.dbl=8},       0,   25, AF },
-    { "threshold", "set threshold",    OFFSET(threshold), AV_OPT_TYPE_DOUBLE, {.dbl=10},      1,  100, AF },
-    { "t", "set threshold",            OFFSET(threshold), AV_OPT_TYPE_DOUBLE, {.dbl=10},      1,  100, AF },
-    { "hsize", "set histogram size",   OFFSET(nb_hbins),  AV_OPT_TYPE_INT,    {.i64=1000},  100, 9999, AF },
-    { "n", "set histogram size",       OFFSET(nb_hbins),  AV_OPT_TYPE_INT,    {.i64=1000},  100, 9999, AF },
-    { "method", "set overlap method",  OFFSET(method),    AV_OPT_TYPE_INT,    {.i64=0},       0,    1, AF, "m" },
-    { "m", "set overlap method",       OFFSET(method),    AV_OPT_TYPE_INT,    {.i64=0},       0,    1, AF, "m" },
-    { "add", "overlap-add",            0,                 AV_OPT_TYPE_CONST,  {.i64=0},       0,    0, AF, "m" },
-    { "a", "overlap-add",              0,                 AV_OPT_TYPE_CONST,  {.i64=0},       0,    0, AF, "m" },
-    { "save", "overlap-save",          0,                 AV_OPT_TYPE_CONST,  {.i64=1},       0,    0, AF, "m" },
-    { "s", "overlap-save",             0,                 AV_OPT_TYPE_CONST,  {.i64=1},       0,    0, AF, "m" },
+    { "w", "set window size",          OFFSET(w),              AV_OPT_TYPE_DOUBLE, {.dbl=55},     10,  100, AF },
+    { "o", "set window overlap",       OFFSET(overlap),        AV_OPT_TYPE_DOUBLE, {.dbl=75},     50,   95, AF },
+    { "a", "set autoregression order", OFFSET(ar),             AV_OPT_TYPE_DOUBLE, {.dbl=8},       0,   25, AF },
+    { "t", "set threshold",            OFFSET(threshold),      AV_OPT_TYPE_DOUBLE, {.dbl=10},      1,  100, AF },
+    { "n", "set histogram size",       OFFSET(nb_hbins),       AV_OPT_TYPE_INT,    {.i64=1000},  100, 9999, AF },
+    { "m", "set overlap method",       OFFSET(method),         AV_OPT_TYPE_INT,    {.i64=0},       0,    1, AF, "m" },
+    { "a", "overlap-add",              0,                      AV_OPT_TYPE_CONST,  {.i64=0},       0,    0, AF, "m" },
+    { "s", "overlap-save",             0,                      AV_OPT_TYPE_CONST,  {.i64=1},       0,    0, AF, "m" },
     { NULL }
 };
 
 AVFILTER_DEFINE_CLASS(adeclip);
 
-const AVFilter ff_af_adeclip = {
+AVFilter ff_af_adeclip = {
     .name          = "adeclip",
     .description   = NULL_IF_CONFIG_SMALL("Remove clipping from input audio."),
     .query_formats = query_formats,
     .priv_size     = sizeof(AudioDeclickContext),
     .priv_class    = &adeclip_class,
     .init          = init,
-    .activate      = activate,
     .uninit        = uninit,
-    FILTER_INPUTS(inputs),
-    FILTER_OUTPUTS(outputs),
-    .flags         = AVFILTER_FLAG_SLICE_THREADS | AVFILTER_FLAG_SUPPORT_TIMELINE_INTERNAL,
+    .inputs        = inputs,
+    .outputs       = outputs,
+    .flags         = AVFILTER_FLAG_SLICE_THREADS,
 };

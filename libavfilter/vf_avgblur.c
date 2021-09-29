@@ -46,7 +46,7 @@ typedef struct AverageBlurContext {
 } AverageBlurContext;
 
 #define OFFSET(x) offsetof(AverageBlurContext, x)
-#define FLAGS AV_OPT_FLAG_VIDEO_PARAM|AV_OPT_FLAG_FILTERING_PARAM|AV_OPT_FLAG_RUNTIME_PARAM
+#define FLAGS AV_OPT_FLAG_VIDEO_PARAM|AV_OPT_FLAG_FILTERING_PARAM
 
 static const AVOption avgblur_options[] = {
     { "sizeX",  "set horizontal size",  OFFSET(radius),  AV_OPT_TYPE_INT, {.i64=1},   1, 1024, FLAGS },
@@ -138,6 +138,7 @@ static int filter_vertically_##name(AVFilterContext *ctx, void *arg, int jobnr, 
         float acc = 0;                                                                        \
         int count = 0;                                                                        \
                                                                                               \
+        ptr = buffer + x;                                                                     \
         src = s->buffer + x;                                                                  \
                                                                                               \
         for (i = 0; i < radius; i++) {                                                        \
@@ -148,7 +149,7 @@ static int filter_vertically_##name(AVFilterContext *ctx, void *arg, int jobnr, 
                                                                                               \
         src = s->buffer + x;                                                                  \
         ptr = buffer + x;                                                                     \
-        for (i = 0; i + radius < height && i <= radius; i++) {                                \
+        for (i = 0; i <= radius; i++) {                                                       \
             acc += src[(i + radius) * width];                                                 \
             count++;                                                                          \
             ptr[i * linesize] = acc / count;                                                  \
@@ -216,12 +217,10 @@ static void averageiir2d(AVFilterContext *ctx, AVFrame *in, AVFrame *out, int pl
     td.height = height;
     td.ptr = in->data[plane];
     td.linesize = in->linesize[plane];
-    ff_filter_execute(ctx, s->filter_horizontally, &td,
-                      NULL, FFMIN(height, nb_threads));
+    ctx->internal->execute(ctx, s->filter_horizontally, &td, NULL, FFMIN(height, nb_threads));
     td.ptr = out->data[plane];
     td.linesize = out->linesize[plane];
-    ff_filter_execute(ctx, s->filter_vertically, &td,
-                      NULL, FFMIN(width, nb_threads));
+    ctx->internal->execute(ctx, s->filter_vertically, &td, NULL, FFMIN(width, nb_threads));
 }
 
 static int query_formats(AVFilterContext *ctx)
@@ -239,7 +238,6 @@ static int query_formats(AVFilterContext *ctx)
         AV_PIX_FMT_YUV420P16, AV_PIX_FMT_YUV422P16, AV_PIX_FMT_YUV444P16,
         AV_PIX_FMT_YUVA420P9, AV_PIX_FMT_YUVA422P9, AV_PIX_FMT_YUVA444P9,
         AV_PIX_FMT_YUVA420P10, AV_PIX_FMT_YUVA422P10, AV_PIX_FMT_YUVA444P10,
-        AV_PIX_FMT_YUVA422P12, AV_PIX_FMT_YUVA444P12,
         AV_PIX_FMT_YUVA420P16, AV_PIX_FMT_YUVA422P16, AV_PIX_FMT_YUVA444P16,
         AV_PIX_FMT_GBRP, AV_PIX_FMT_GBRP9, AV_PIX_FMT_GBRP10,
         AV_PIX_FMT_GBRP12, AV_PIX_FMT_GBRP14, AV_PIX_FMT_GBRP16,
@@ -248,7 +246,7 @@ static int query_formats(AVFilterContext *ctx)
         AV_PIX_FMT_NONE
     };
 
-    return ff_set_common_formats_from_list(ctx, pix_fmts);
+    return ff_set_common_formats(ctx, ff_make_format_list(pix_fmts));
 }
 
 static int filter_frame(AVFilterLink *inlink, AVFrame *in)
@@ -304,6 +302,7 @@ static const AVFilterPad avgblur_inputs[] = {
         .config_props = config_input,
         .filter_frame = filter_frame,
     },
+    { NULL }
 };
 
 static const AVFilterPad avgblur_outputs[] = {
@@ -311,17 +310,17 @@ static const AVFilterPad avgblur_outputs[] = {
         .name = "default",
         .type = AVMEDIA_TYPE_VIDEO,
     },
+    { NULL }
 };
 
-const AVFilter ff_vf_avgblur = {
+AVFilter ff_vf_avgblur = {
     .name          = "avgblur",
     .description   = NULL_IF_CONFIG_SMALL("Apply Average Blur filter."),
     .priv_size     = sizeof(AverageBlurContext),
     .priv_class    = &avgblur_class,
     .uninit        = uninit,
     .query_formats = query_formats,
-    FILTER_INPUTS(avgblur_inputs),
-    FILTER_OUTPUTS(avgblur_outputs),
+    .inputs        = avgblur_inputs,
+    .outputs       = avgblur_outputs,
     .flags         = AVFILTER_FLAG_SUPPORT_TIMELINE_GENERIC | AVFILTER_FLAG_SLICE_THREADS,
-    .process_command = ff_filter_process_command,
 };

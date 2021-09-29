@@ -55,9 +55,6 @@ static int ptx_decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
 
     buf += offset;
 
-    if (buf_end - buf < w * bytes_per_pixel)
-        return AVERROR_INVALIDDATA;
-
     if ((ret = ff_set_dimensions(avctx, w, h)) < 0)
         return ret;
 
@@ -85,7 +82,7 @@ static int ptx_decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
     return offset + w*h*bytes_per_pixel;
 }
 
-const AVCodec ff_ptx_decoder = {
+AVCodec ff_ptx_decoder = {
     .name           = "ptx",
     .long_name      = NULL_IF_CONFIG_SMALL("V.Flash PTX image"),
     .type           = AVMEDIA_TYPE_VIDEO,

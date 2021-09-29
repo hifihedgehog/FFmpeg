@@ -19,48 +19,68 @@
 #ifndef AVCODEC_MF_UTILS_H
 #define AVCODEC_MF_UTILS_H
 
+#include <errno.h>
+
 #include <windows.h>
 #include <initguid.h>
-#ifdef _MSC_VER
-// The official way of including codecapi (via dshow.h) makes the ICodecAPI
-// interface unavailable in UWP mode, but including icodecapi.h + codecapi.h
-// seems to be equivalent. (These headers conflict with the official way
-// of including it though, through strmif.h via dshow.h. And on mingw, the
-// mf*.h headers below indirectly include strmif.h.)
-#include <icodecapi.h>
-#else
-#include <dshow.h>
-// Older versions of mingw-w64 need codecapi.h explicitly included, while newer
-// ones include it implicitly from dshow.h (via uuids.h).
-#include <codecapi.h>
-#endif
+#include <wmcodecdsp.h>
+#include <mftransform.h>
 #include <mfapi.h>
 #include <mferror.h>
 #include <mfobjects.h>
-#include <mftransform.h>
+#include <ksmedia.h>
+#include <uuids.h>
+#include <codecapi.h>
+
+#include "libavutil/avassert.h"
+#include "libavutil/imgutils.h"
+#include "libavutil/opt.h"
 
 #include "avcodec.h"
+#include "internal.h"
 
-// These functions do exist in mfapi.h, but are only available within
-// __cplusplus ifdefs.
-HRESULT ff_MFGetAttributeSize(IMFAttributes *pattr, REFGUID guid,
-                              UINT32 *pw, UINT32 *ph);
-HRESULT ff_MFSetAttributeSize(IMFAttributes *pattr, REFGUID guid,
-                              UINT32 uw, UINT32 uh);
+// ugly wrappers for mingw not providing these functions
+
+// the attribute/ratio setter/getters are guarded by __cplusplus
+
+HRESULT ff_MFGetAttributeSize(
+  _In_  IMFAttributes *pAttributes,
+  _In_  REFGUID       guidKey,
+  _Out_ UINT32        *punWidth,
+  _Out_ UINT32        *punHeight
+);
+
+HRESULT ff_MFSetAttributeSize(
+  _In_ IMFAttributes *pAttributes,
+  _In_ REFGUID       guidKey,
+  _In_ UINT32        unWidth,
+  _In_ UINT32        unHeight
+);
+
 #define ff_MFSetAttributeRatio ff_MFSetAttributeSize
 #define ff_MFGetAttributeRatio ff_MFGetAttributeSize
 
-// MFTEnumEx was missing from mingw-w64's mfplat import library until
-// mingw-w64 v6.0.0, thus wrap it and load it using GetProcAddress.
-// It's also missing in Windows Vista's mfplat.dll.
-HRESULT ff_MFTEnumEx(GUID guidCategory, UINT32 Flags,
-                     const MFT_REGISTER_TYPE_INFO *pInputType,
-                     const MFT_REGISTER_TYPE_INFO *pOutputType,
-                     IMFActivate ***pppMFTActivate, UINT32 *pnumMFTActivate);
+// mingw declares this, but it's missing from the import lib
+HRESULT ff_MFTEnumEx(
+    _In_        GUID                   guidCategory,
+    _In_        UINT32                 Flags,
+    _In_  const MFT_REGISTER_TYPE_INFO *pInputType,
+    _In_  const MFT_REGISTER_TYPE_INFO *pOutputType,
+    _Out_       IMFActivate            ***pppMFTActivate,
+    _Out_       UINT32                 *pcMFTActivate
+);
 
+DEFINE_GUID(ff_MF_MT_VIDEO_ROTATION, 0xc380465d, 0x2271, 0x428c, 0x9b, 0x83, 0xec, 0xea, 0x3b, 0x4a, 0x85, 0xc1);
+DEFINE_GUID(ff_CODECAPI_AVDecVideoAcceleration_H264, 0xf7db8a2f, 0x4f48, 0x4ee8, 0xae, 0x31, 0x8b, 0x6e, 0xbe, 0x55, 0x8a, 0xe2);
 
-// These do exist in mingw-w64's codecapi.h, but they aren't properly defined
-// by the header until after mingw-w64 v7.0.0.
+// WMA1. Apparently there is no official GUID symbol for this.
+DEFINE_GUID(ff_MFAudioFormat_MSAUDIO1, 0x00000160, 0x0000, 0x0010, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71);
+
+// MP42 FourCC. I made up the symbol name.
+DEFINE_GUID(ff_MFVideoFormat_MP42, 0x3234504D, 0x0000, 0x0010, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71);
+
+// From mingw's headers. Don't ask me why mingw's header (apparently) doesn't define
+// them properly. It's all batshit murder clown insane.
 DEFINE_GUID(ff_CODECAPI_AVDecVideoThumbnailGenerationMode, 0x2efd8eee,0x1150,0x4328,0x9c,0xf5,0x66,0xdc,0xe9,0x33,0xfc,0xf4);
 DEFINE_GUID(ff_CODECAPI_AVDecVideoDropPicWithMissingRef, 0xf8226383,0x14c2,0x4567,0x97,0x34,0x50,0x04,0xe9,0x6f,0xf8,0x87);
 DEFINE_GUID(ff_CODECAPI_AVDecVideoSoftwareDeinterlaceMode, 0x0c08d1ce,0x9ced,0x4540,0xba,0xe3,0xce,0xb3,0x80,0x14,0x11,0x09);
@@ -78,15 +98,49 @@ DEFINE_GUID(ff_CODECAPI_AVDecNumWorkerThreads, 0x9561c3e8,0xea9e,0x4435,0x9b,0x1
 DEFINE_GUID(ff_CODECAPI_AVDecSoftwareDynamicFormatChange, 0x862e2f0a,0x507b,0x47ff,0xaf,0x47,0x01,0xe2,0x62,0x42,0x98,0xb7);
 DEFINE_GUID(ff_CODECAPI_AVDecDisableVideoPostProcessing, 0xf8749193,0x667a,0x4f2c,0xa9,0xe8,0x5d,0x4a,0xf9,0x24,0xf0,0x8f);
 
-// These are missing from mingw-w64's headers until after mingw-w64 v7.0.0.
+// Some arbitrary encoding GUIDs. Derived from official MS headers. (No other way to get them.)
 DEFINE_GUID(ff_CODECAPI_AVEncCommonRateControlMode,      0x1c0608e9, 0x370c, 0x4710, 0x8a, 0x58, 0xcb, 0x61, 0x81, 0xc4, 0x24, 0x23);
+DEFINE_GUID(ff_CODECAPI_AVEncCommonLowLatency,    0x9d3ecd55, 0x89e8, 0x490a, 0x97, 0x0a, 0x0c, 0x95, 0x48, 0xd5, 0xa5, 0x6e);
+DEFINE_GUID(ff_CODECAPI_AVEncCommonRealTime,      0x143a0ff6, 0xa131, 0x43da, 0xb8, 0x1e, 0x98, 0xfb, 0xb8, 0xec, 0x37, 0x8e);
 DEFINE_GUID(ff_CODECAPI_AVEncCommonQuality,       0xfcbf57a3, 0x7ea5, 0x4b0c, 0x96, 0x44, 0x69, 0xb4, 0x0c, 0x39, 0xc3, 0x91);
+DEFINE_GUID(ff_CODECAPI_AVEncCommonQualityVsSpeed, 0x98332df8, 0x03cd, 0x476b, 0x89, 0xfa, 0x3f, 0x9e, 0x44, 0x2d, 0xec, 0x9f);
+DEFINE_GUID(ff_CODECAPI_AVEncCommonTranscodeEncodingProfile, 0x6947787C, 0xF508, 0x4EA9, 0xB1, 0xE9, 0xA1, 0xFE, 0x3A, 0x49, 0xFB, 0xC9);
 DEFINE_GUID(ff_CODECAPI_AVEncCommonMeanBitRate,   0xf7222374, 0x2144, 0x4815, 0xb5, 0x50, 0xa3, 0x7f, 0x8e, 0x12, 0xee, 0x52);
+DEFINE_GUID(ff_CODECAPI_AVEncCommonMeanBitRateInterval, 0xbfaa2f0c, 0xcb82, 0x4bc0, 0x84, 0x74, 0xf0, 0x6a, 0x8a, 0x0d, 0x02, 0x58);
+DEFINE_GUID(ff_CODECAPI_AVEncCommonMaxBitRate,    0x9651eae4, 0x39b9, 0x4ebf, 0x85, 0xef, 0xd7, 0xf4, 0x44, 0xec, 0x74, 0x65);
+DEFINE_GUID(ff_CODECAPI_AVEncCommonMinBitRate,    0x101405b2, 0x2083, 0x4034, 0xa8, 0x06, 0xef, 0xbe, 0xdd, 0xd7, 0xc9, 0xff);
+DEFINE_GUID(ff_CODECAPI_AVEncVideoCBRMotionTradeoff, 0x0d49451e, 0x18d5, 0x4367, 0xa4, 0xef, 0x32, 0x40, 0xdf, 0x16, 0x93, 0xc4);
+DEFINE_GUID(ff_CODECAPI_AVEncVideoCodedVideoAccessUnitSize, 0xb4b10c15, 0x14a7, 0x4ce8, 0xb1, 0x73, 0xdc, 0x90, 0xa0, 0xb4, 0xfc, 0xdb);
+DEFINE_GUID(ff_CODECAPI_AVEncVideoMaxKeyframeDistance,   0x2987123a, 0xba93, 0x4704, 0xb4, 0x89, 0xec, 0x1e, 0x5f, 0x25, 0x29, 0x2c);
 DEFINE_GUID(ff_CODECAPI_AVEncH264CABACEnable,    0xee6cad62, 0xd305, 0x4248, 0xa5, 0xe, 0xe1, 0xb2, 0x55, 0xf7, 0xca, 0xf8);
+DEFINE_GUID(ff_CODECAPI_AVEncVideoContentType,   0x66117aca, 0xeb77, 0x459d, 0x93, 0xc, 0xa4, 0x8d, 0x9d, 0x6, 0x83, 0xfc);
+DEFINE_GUID(ff_CODECAPI_AVEncNumWorkerThreads,   0xb0c8bf60, 0x16f7, 0x4951, 0xa3, 0xb, 0x1d, 0xb1, 0x60, 0x92, 0x93, 0xd6);
+DEFINE_GUID(ff_CODECAPI_AVEncVideoEncodeQP,      0x2cb5696b, 0x23fb, 0x4ce1, 0xa0, 0xf9, 0xef, 0x5b, 0x90, 0xfd, 0x55, 0xca);
+DEFINE_GUID(ff_CODECAPI_AVEncVideoMinQP,         0x0ee22c6a, 0xa37c, 0x4568, 0xb5, 0xf1, 0x9d, 0x4c, 0x2b, 0x3a, 0xb8, 0x86);
 DEFINE_GUID(ff_CODECAPI_AVEncVideoForceKeyFrame, 0x398c1b98, 0x8353, 0x475a, 0x9e, 0xf2, 0x8f, 0x26, 0x5d, 0x26, 0x3, 0x45);
+DEFINE_GUID(ff_CODECAPI_AVEncAdaptiveMode,       0x4419b185, 0xda1f, 0x4f53, 0xbc, 0x76, 0x9, 0x7d, 0xc, 0x1e, 0xfb, 0x1e);
+DEFINE_GUID(ff_CODECAPI_AVEncVideoTemporalLayerCount,    0x19caebff, 0xb74d, 0x4cfd, 0x8c, 0x27, 0xc2, 0xf9, 0xd9, 0x7d, 0x5f, 0x52);
+DEFINE_GUID(ff_CODECAPI_AVEncVideoUsage,         0x1f636849, 0x5dc1, 0x49f1, 0xb1, 0xd8, 0xce, 0x3c, 0xf6, 0x2e, 0xa3, 0x85);
+DEFINE_GUID(ff_CODECAPI_AVEncVideoSelectLayer,        0xeb1084f5, 0x6aaa, 0x4914, 0xbb, 0x2f, 0x61, 0x47, 0x22, 0x7f, 0x12, 0xe7);
+DEFINE_GUID(ff_CODECAPI_AVEncVideoRateControlParams,  0x87d43767, 0x7645, 0x44ec, 0xb4, 0x38, 0xd3, 0x32, 0x2f, 0xbc, 0xa2, 0x9f);
+DEFINE_GUID(ff_CODECAPI_AVEncVideoSupportedControls,  0xd3f40fdd, 0x77b9, 0x473d, 0x81, 0x96, 0x6, 0x12, 0x59, 0xe6, 0x9c, 0xff);
+DEFINE_GUID(ff_CODECAPI_AVEncVideoEncodeFrameTypeQP, 0xaa70b610, 0xe03f, 0x450c, 0xad, 0x07, 0x07, 0x31, 0x4e, 0x63, 0x9c, 0xe7);
+DEFINE_GUID(ff_CODECAPI_AVEncSliceControlMode,       0xe9e782ef, 0x5f18, 0x44c9, 0xa9, 0x0b, 0xe9, 0xc3, 0xc2, 0xc1, 0x7b, 0x0b);
+DEFINE_GUID(ff_CODECAPI_AVEncSliceControlSize,       0x92f51df3, 0x07a5, 0x4172, 0xae, 0xfe, 0xc6, 0x9c, 0xa3, 0xb6, 0x0e, 0x35);
+DEFINE_GUID(ff_CODECAPI_AVEncVideoMaxNumRefFrame,    0x964829ed, 0x94f9, 0x43b4, 0xb7, 0x4d, 0xef, 0x40, 0x94, 0x4b, 0x69, 0xa0);
+DEFINE_GUID(ff_CODECAPI_AVEncVideoMeanAbsoluteDifference,    0xe5c0c10f, 0x81a4, 0x422d, 0x8c, 0x3f, 0xb4, 0x74, 0xa4, 0x58, 0x13, 0x36);
+DEFINE_GUID(ff_CODECAPI_AVEncVideoMaxQP,             0x3daf6f66, 0xa6a7, 0x45e0, 0xa8, 0xe5, 0xf2, 0x74, 0x3f, 0x46, 0xa3, 0xa2);
+DEFINE_GUID(ff_CODECAPI_AVEncMPVGOPSize,          0x95f31b26, 0x95a4, 0x41aa, 0x93, 0x03, 0x24, 0x6a, 0x7f, 0xc6, 0xee, 0xf1);
+DEFINE_GUID(ff_CODECAPI_AVEncMPVGOPOpen,          0xb1d5d4a6, 0x3300, 0x49b1, 0xae, 0x61, 0xa0, 0x99, 0x37, 0xab, 0x0e, 0x49);
 DEFINE_GUID(ff_CODECAPI_AVEncMPVDefaultBPictureCount, 0x8d390aac, 0xdc5c, 0x4200, 0xb5, 0x7f, 0x81, 0x4d, 0x04, 0xba, 0xba, 0xb2);
-DEFINE_GUID(ff_CODECAPI_AVScenarioInfo, 0xb28a6e64,0x3ff9,0x446a,0x8a,0x4b,0x0d,0x7a,0x53,0x41,0x32,0x36);
+DEFINE_GUID(ff_CODECAPI_AVEncMPVProfile,          0xdabb534a, 0x1d99, 0x4284, 0x97, 0x5a, 0xd9, 0x0e, 0x22, 0x39, 0xba, 0xa1);
+DEFINE_GUID(ff_CODECAPI_AVEncMPVLevel,            0x6ee40c40, 0xa60c, 0x41ef, 0x8f, 0x50, 0x37, 0xc2, 0x24, 0x9e, 0x2c, 0xb3);
+DEFINE_GUID(ff_CODECAPI_AVEncMPVFrameFieldMode,   0xacb5de96, 0x7b93, 0x4c2f, 0x88, 0x25, 0xb0, 0x29, 0x5f, 0xa9, 0x3b, 0xf4);
+DEFINE_GUID(ff_CODECAPI_AVEncMPVAddSeqEndCode,    0xa823178f, 0x57df, 0x4c7a, 0xb8, 0xfd, 0xe5, 0xec, 0x88, 0x87, 0x70, 0x8d);
+DEFINE_GUID(ff_CODECAPI_AVEncMPVGOPSInSeq,        0x993410d4, 0x2691, 0x4192, 0x99, 0x78, 0x98, 0xdc, 0x26, 0x03, 0x66, 0x9f);
+DEFINE_GUID(ff_CODECAPI_AVEncMPVUseConcealmentMotionVectors,  0xec770cf3, 0x6908, 0x4b4b, 0xaa, 0x30, 0x7f, 0xb9, 0x86, 0x21, 0x4f, 0xea);
 
+// GUIDs missing in mingw, derived from mfnet
 DEFINE_GUID(ff_MF_SA_D3D11_BINDFLAGS, 0xeacf97ad, 0x065c, 0x4408, 0xbe, 0xe3, 0xfd, 0xcb, 0xfd, 0x12, 0x8b, 0xe2);
 DEFINE_GUID(ff_MF_SA_D3D11_USAGE, 0xe85fe442, 0x2ca3, 0x486e, 0xa9, 0xc7, 0x10, 0x9d, 0xda, 0x60, 0x98, 0x80);
 DEFINE_GUID(ff_MF_SA_D3D11_AWARE, 0x206b4fc8, 0xfcf9, 0x4c51, 0xaf, 0xe3, 0x97, 0x64, 0x36, 0x9e, 0x33, 0xa0);
@@ -95,11 +149,13 @@ DEFINE_GUID(ff_MF_SA_D3D11_SHARED_WITHOUT_MUTEX, 0x39dbd44d, 0x2e44, 0x4931, 0xa
 DEFINE_GUID(ff_MF_SA_MINIMUM_OUTPUT_SAMPLE_COUNT, 0x851745d5, 0xc3d6, 0x476d, 0x95, 0x27, 0x49, 0x8e, 0xf2, 0xd1, 0xd, 0x18);
 DEFINE_GUID(ff_MF_SA_MINIMUM_OUTPUT_SAMPLE_COUNT_PROGRESSIVE, 0xf5523a5, 0x1cb2, 0x47c5, 0xa5, 0x50, 0x2e, 0xeb, 0x84, 0xb4, 0xd1, 0x4a);
 
-DEFINE_MEDIATYPE_GUID(ff_MFVideoFormat_HEVC, 0x43564548); // FCC('HEVC')
-DEFINE_MEDIATYPE_GUID(ff_MFVideoFormat_HEVC_ES, 0x53564548); // FCC('HEVS')
 
-
-// This enum is missing from mingw-w64's codecapi.h by v7.0.0.
+// missing from mingw headers; copied from MSDN
+enum ff_eAVEncH264PictureType {
+    ff_eAVEncH264PictureType_IDR  = 0,
+    ff_eAVEncH264PictureType_P,
+    ff_eAVEncH264PictureType_B
+};
 enum ff_eAVEncCommonRateControlMode {
     ff_eAVEncCommonRateControlMode_CBR                 = 0,
     ff_eAVEncCommonRateControlMode_PeakConstrainedVBR  = 1,
@@ -110,35 +166,13 @@ enum ff_eAVEncCommonRateControlMode {
     ff_eAVEncCommonRateControlMode_GlobalLowDelayVBR   = 6
 };
 
-enum ff_eAVScenarioInfo {
-    ff_eAVScenarioInfo_Unknown                         = 0,
-    ff_eAVScenarioInfo_DisplayRemoting                 = 1,
-    ff_eAVScenarioInfo_VideoConference                 = 2,
-    ff_eAVScenarioInfo_Archive                         = 3,
-    ff_eAVScenarioInfo_LiveStreaming                   = 4,
-    ff_eAVScenarioInfo_CameraRecord                    = 5,
-    ff_eAVScenarioInfo_DisplayRemotingWithFeatureMap   = 6
-};
-
-// These do exist in mingw-w64's mfobjects.idl, but are missing from
-// mfobjects.h that is generated from the former, due to incorrect use of
-// ifdefs in the IDL file.
+// derived from mingw's mfobjects.idl (the C headers don't contain these)
 enum {
     ff_METransformUnknown = 600,
     ff_METransformNeedInput,
     ff_METransformHaveOutput,
     ff_METransformDrainComplete,
     ff_METransformMarker,
-};
-
-// These do exist in all supported headers, but are manually defined here
-// to avoid having to include codecapi.h, as there's problems including that
-// header when targeting UWP (where including it with MSVC seems to work,
-// but fails when built with clang in MSVC mode).
-enum ff_eAVEncH264VProfile {
-   ff_eAVEncH264VProfile_Base = 66,
-   ff_eAVEncH264VProfile_Main = 77,
-   ff_eAVEncH264VProfile_High = 100,
 };
 
 char *ff_hr_str_buf(char *buf, size_t size, HRESULT hr);
@@ -154,16 +188,21 @@ IMFSample *ff_create_memory_sample(void *fill_data, size_t size, size_t align);
 enum AVSampleFormat ff_media_type_to_sample_fmt(IMFAttributes *type);
 enum AVPixelFormat ff_media_type_to_pix_fmt(IMFAttributes *type);
 const GUID *ff_pix_fmt_to_guid(enum AVPixelFormat pix_fmt);
-int ff_fourcc_from_guid(const GUID *guid, uint32_t *out_fourcc);
-char *ff_guid_str_buf(char *buf, size_t buf_size, const GUID *guid);
+int ff_fourcc_from_guid(GUID *guid, uint32_t *out_fourcc);
+char *ff_guid_str_buf(char *buf, size_t buf_size, GUID *guid);
 #define ff_guid_str(guid) ff_guid_str_buf((char[80]){0}, 80, guid)
 void ff_attributes_dump(void *log, IMFAttributes *attrs);
 void ff_media_type_dump(void *log, IMFMediaType *type);
+int ff_create_mf_buffer_ref(AVCodecContext *avctx, AVFrame *frame,
+                            IMFMediaBuffer *buffer);
 const CLSID *ff_codec_to_mf_subtype(enum AVCodecID codec);
-int ff_instantiate_mf(void *log, GUID category,
+int ff_init_com_mf(void *log);
+int ff_instantiate_mf(void *log,
+                      GUID category,
                       MFT_REGISTER_TYPE_INFO *in_type,
                       MFT_REGISTER_TYPE_INFO *out_type,
-                      int use_hw, IMFTransform **res);
+                      int use_hw,
+                      IMFTransform **res);
 void ff_free_mf(IMFTransform **mft);
 
 #endif

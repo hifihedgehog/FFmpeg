@@ -33,7 +33,6 @@
 #include "libavutil/crc.h"
 #include "libavutil/downmix_info.h"
 #include "libavutil/opt.h"
-#include "libavutil/thread.h"
 #include "bswapdsp.h"
 #include "internal.h"
 #include "aac_ac3_parser.h"
@@ -184,26 +183,23 @@ static av_cold void ac3_tables_init(void)
  */
 static av_cold int ac3_decode_init(AVCodecContext *avctx)
 {
-    static AVOnce init_static_once = AV_ONCE_INIT;
     AC3DecodeContext *s = avctx->priv_data;
-    int i, ret;
+    int i;
 
     s->avctx = avctx;
 
-    if ((ret = ff_mdct_init(&s->imdct_256, 8, 1, 1.0)) < 0 ||
-        (ret = ff_mdct_init(&s->imdct_512, 9, 1, 1.0)) < 0)
-        return ret;
+    ac3_tables_init();
+    ff_mdct_init(&s->imdct_256, 8, 1, 1.0);
+    ff_mdct_init(&s->imdct_512, 9, 1, 1.0);
     AC3_RENAME(ff_kbd_window_init)(s->window, 5.0, 256);
     ff_bswapdsp_init(&s->bdsp);
 
 #if (USE_FIXED)
     s->fdsp = avpriv_alloc_fixed_dsp(avctx->flags & AV_CODEC_FLAG_BITEXACT);
 #else
-    ff_fmt_convert_init(&s->fmt_conv, avctx);
     s->fdsp = avpriv_float_dsp_alloc(avctx->flags & AV_CODEC_FLAG_BITEXACT);
+    ff_fmt_convert_init(&s->fmt_conv, avctx);
 #endif
-    if (!s->fdsp)
-        return AVERROR(ENOMEM);
 
     ff_ac3dsp_init(&s->ac3dsp, avctx->flags & AV_CODEC_FLAG_BITEXACT);
     av_lfg_init(&s->dith_state, 0);
@@ -226,8 +222,6 @@ static av_cold int ac3_decode_init(AVCodecContext *avctx)
         s->xcfptr[i] = s->transform_coeffs[i];
         s->dlyptr[i] = s->delay[i];
     }
-
-    ff_thread_once(&init_static_once, ac3_tables_init);
 
     return 0;
 }
@@ -356,12 +350,14 @@ static int parse_frame_header(AC3DecodeContext *s)
         s->skip_syntax           = 1;
         memset(s->channel_uses_aht, 0, sizeof(s->channel_uses_aht));
         return ac3_parse_header(s);
-    } else if (CONFIG_EAC3_DECODER) {
+    } else {
+#if CONFIG_EAC3_DECODER
         s->eac3 = 1;
         return ff_eac3_parse_header(s);
-    } else {
+#else
         av_log(s->avctx, AV_LOG_ERROR, "E-AC-3 support not compiled in\n");
         return AVERROR(ENOSYS);
+#endif
     }
 }
 
@@ -616,6 +612,7 @@ static inline void decode_transform_coeffs_ch(AC3DecodeContext *s, int blk,
     if (!s->channel_uses_aht[ch]) {
         ac3_decode_transform_coeffs_ch(s, ch, m);
     } else {
+#if CONFIG_EAC3_DECODER
         /* if AHT is used, mantissas for all blocks are encoded in the first
            block of the frame. */
         int bin;
@@ -624,6 +621,7 @@ static inline void decode_transform_coeffs_ch(AC3DecodeContext *s, int blk,
         for (bin = s->start_freq[ch]; bin < s->end_freq[ch]; bin++) {
             s->fixed_coeffs[ch][bin] = s->pre_mantissa[ch][bin][blk] >> s->dexps[ch][bin];
         }
+#endif
     }
 }
 
@@ -781,7 +779,7 @@ static void decode_band_structure(GetBitContext *gbc, int blk, int eac3,
 
     n_subbands = end_subband - start_subband;
 
-    if (!blk)
+    if (!blk && default_band_struct)
         memcpy(band_struct, default_band_struct, band_struct_size);
 
     av_assert0(band_struct_size >= start_subband + n_subbands);
@@ -818,6 +816,8 @@ static void decode_band_structure(GetBitContext *gbc, int blk, int eac3,
     if (band_sizes)
         memcpy(band_sizes, bnd_sz, n_bands);
 }
+
+#if CONFIG_EAC3_DECODER
 
 static inline int spx_strategy(AC3DecodeContext *s, int blk)
 {
@@ -954,6 +954,8 @@ static inline void spx_coordinates(AC3DecodeContext *s)
     }
 }
 
+#endif
+
 static inline int coupling_strategy(AC3DecodeContext *s, int blk,
                                     uint8_t *bit_alloc_stages)
 {
@@ -1006,11 +1008,19 @@ static inline int coupling_strategy(AC3DecodeContext *s, int blk,
         s->start_freq[CPL_CH] = cpl_start_subband * 12 + 37;
         s->end_freq[CPL_CH]   = cpl_end_subband   * 12 + 37;
 
+#if CONFIG_EAC3_DECODER
         decode_band_structure(bc, blk, s->eac3, 0, cpl_start_subband,
                               cpl_end_subband,
                               ff_eac3_default_cpl_band_struct,
                               &s->num_cpl_bands, s->cpl_band_sizes,
                               s->cpl_band_struct, sizeof(s->cpl_band_struct));
+#else
+        decode_band_structure(bc, blk, 0, 0, cpl_start_subband,
+                              cpl_end_subband,
+                              NULL,
+                              &s->num_cpl_bands, s->cpl_band_sizes,
+                              s->cpl_band_struct, sizeof(s->cpl_band_struct));
+#endif
     } else {
         /* coupling not in use */
         for (ch = 1; ch <= fbw_channels; ch++) {
@@ -1115,6 +1125,7 @@ static int decode_audio_block(AC3DecodeContext *s, int blk, int offset)
         }
     } while (i--);
 
+#if CONFIG_EAC3_DECODER
     /* spectral extension strategy */
     if (s->eac3 && (!blk || get_bits1(gbc))) {
         s->spx_in_use = get_bits1(gbc);
@@ -1123,6 +1134,7 @@ static int decode_audio_block(AC3DecodeContext *s, int blk, int offset)
                 return ret;
         }
     }
+#endif
     if (!s->eac3 || !s->spx_in_use) {
         s->spx_in_use = 0;
         for (ch = 1; ch <= fbw_channels; ch++) {
@@ -1131,9 +1143,11 @@ static int decode_audio_block(AC3DecodeContext *s, int blk, int offset)
         }
     }
 
+#if CONFIG_EAC3_DECODER
     /* spectral extension coordinates */
     if (s->spx_in_use)
         spx_coordinates(s);
+#endif
 
     /* coupling strategy */
     if (s->eac3 ? s->cpl_strategy_exists[blk] : get_bits1(gbc)) {
@@ -1366,8 +1380,12 @@ static int decode_audio_block(AC3DecodeContext *s, int blk, int offset)
         }
         if (bit_alloc_stages[ch] > 0) {
             /* Compute bit allocation */
+#if CONFIG_EAC3_DECODER
             const uint8_t *bap_tab = s->channel_uses_aht[ch] ?
                                      ff_eac3_hebap_tab : ff_ac3_bap_tab;
+#else
+            const uint8_t *bap_tab = ff_ac3_bap_tab;
+#endif
             s->ac3dsp.bit_alloc_calc_bap(s->mask[ch], s->psd[ch],
                                       s->start_freq[ch], s->end_freq[ch],
                                       s->snr_offset[ch],
@@ -1414,10 +1432,12 @@ static int decode_audio_block(AC3DecodeContext *s, int blk, int offset)
 #endif
     }
 
+#if CONFIG_EAC3_DECODER
     /* apply spectral extension to high frequency bins */
     if (CONFIG_EAC3_DECODER && s->spx_in_use) {
         ff_eac3_apply_spectral_extension(s);
     }
+#endif
 
     /* downmix and MDCT. order depends on whether block switching is used for
        any channel in this block. this is because coefficients for the long
@@ -1624,6 +1644,14 @@ dependent_frame:
     avctx->audio_service_type = s->bitstream_mode;
     if (s->bitstream_mode == 0x7 && s->channels > 1)
         avctx->audio_service_type = AV_AUDIO_SERVICE_TYPE_KARAOKE;
+
+// PLEX
+    // The parser or something terrible in libavformat can overwrite this.
+    if (USE_FIXED)
+        avctx->sample_fmt = AV_SAMPLE_FMT_S16P;
+    else
+        avctx->sample_fmt = AV_SAMPLE_FMT_FLTP;
+// PLEX
 
     /* decode the audio blocks */
     channel_map = ff_ac3_dec_channel_map[s->output_mode & ~AC3_OUTPUT_LFEON][s->lfe_on];

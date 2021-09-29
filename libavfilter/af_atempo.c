@@ -103,9 +103,6 @@ typedef struct ATempoContext {
     // 1: output sample position
     int64_t position[2];
 
-    // first input timestamp, all other timestamps are offset by this one
-    int64_t start_pts;
-
     // sample format:
     enum AVSampleFormat format;
 
@@ -162,7 +159,7 @@ static const AVOption atempo_options[] = {
       OFFSET(tempo), AV_OPT_TYPE_DOUBLE, { .dbl = 1.0 },
       YAE_ATEMPO_MIN,
       YAE_ATEMPO_MAX,
-      AV_OPT_FLAG_AUDIO_PARAM | AV_OPT_FLAG_FILTERING_PARAM | AV_OPT_FLAG_RUNTIME_PARAM },
+      AV_OPT_FLAG_AUDIO_PARAM | AV_OPT_FLAG_FILTERING_PARAM },
     { NULL }
 };
 
@@ -189,7 +186,6 @@ static void yae_clear(ATempoContext *atempo)
 
     atempo->nfrag = 0;
     atempo->state = YAE_LOAD_FRAGMENT;
-    atempo->start_pts = AV_NOPTS_VALUE;
 
     atempo->position[0] = 0;
     atempo->position[1] = 0;
@@ -328,14 +324,28 @@ static int yae_reset(ATempoContext *atempo,
     return 0;
 }
 
-static int yae_update(AVFilterContext *ctx)
+static int yae_set_tempo(AVFilterContext *ctx, const char *arg_tempo)
 {
     const AudioFragment *prev;
     ATempoContext *atempo = ctx->priv;
+    char   *tail = NULL;
+    double tempo = av_strtod(arg_tempo, &tail);
+
+    if (tail && *tail) {
+        av_log(ctx, AV_LOG_ERROR, "Invalid tempo value '%s'\n", arg_tempo);
+        return AVERROR(EINVAL);
+    }
+
+    if (tempo < YAE_ATEMPO_MIN || tempo > YAE_ATEMPO_MAX) {
+        av_log(ctx, AV_LOG_ERROR, "Tempo value %f exceeds [%f, %f] range\n",
+               tempo, YAE_ATEMPO_MIN, YAE_ATEMPO_MAX);
+        return AVERROR(EINVAL);
+    }
 
     prev = yae_prev_frag(atempo);
     atempo->origin[0] = prev->position[0] + atempo->window / 2;
     atempo->origin[1] = prev->position[1] + atempo->window / 2;
+    atempo->tempo = tempo;
     return 0;
 }
 
@@ -995,6 +1005,9 @@ static av_cold void uninit(AVFilterContext *ctx)
 
 static int query_formats(AVFilterContext *ctx)
 {
+    AVFilterChannelLayouts *layouts = NULL;
+    AVFilterFormats        *formats = NULL;
+
     // WSOLA necessitates an internal sliding window ring buffer
     // for incoming audio stream.
     //
@@ -1009,15 +1022,29 @@ static int query_formats(AVFilterContext *ctx)
         AV_SAMPLE_FMT_DBL,
         AV_SAMPLE_FMT_NONE
     };
-    int ret = ff_set_common_all_channel_counts(ctx);
+    int ret;
+
+    layouts = ff_all_channel_counts();
+    if (!layouts) {
+        return AVERROR(ENOMEM);
+    }
+    ret = ff_set_common_channel_layouts(ctx, layouts);
     if (ret < 0)
         return ret;
 
-    ret = ff_set_common_formats_from_list(ctx, sample_fmts);
+    formats = ff_make_format_list(sample_fmts);
+    if (!formats) {
+        return AVERROR(ENOMEM);
+    }
+    ret = ff_set_common_formats(ctx, formats);
     if (ret < 0)
         return ret;
 
-    return ff_set_common_all_samplerates(ctx);
+    formats = ff_all_samplerates();
+    if (!formats) {
+        return AVERROR(ENOMEM);
+    }
+    return ff_set_common_samplerates(ctx, formats);
 }
 
 static int config_props(AVFilterLink *inlink)
@@ -1041,7 +1068,7 @@ static int push_samples(ATempoContext *atempo,
     atempo->dst_buffer->nb_samples  = n_out;
 
     // adjust the PTS:
-    atempo->dst_buffer->pts = atempo->start_pts +
+    atempo->dst_buffer->pts =
         av_rescale_q(atempo->nsamples_out,
                      (AVRational){ 1, outlink->sample_rate },
                      outlink->time_base);
@@ -1069,11 +1096,6 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *src_buffer)
 
     const uint8_t *src = src_buffer->data[0];
     const uint8_t *src_end = src + n_in * atempo->stride;
-
-    if (atempo->start_pts == AV_NOPTS_VALUE)
-        atempo->start_pts = av_rescale_q(src_buffer->pts,
-                                         inlink->time_base,
-                                         outlink->time_base);
 
     while (src < src_end) {
         if (!atempo->dst_buffer) {
@@ -1158,12 +1180,7 @@ static int process_command(AVFilterContext *ctx,
                            int res_len,
                            int flags)
 {
-    int ret = ff_filter_process_command(ctx, cmd, arg, res, res_len, flags);
-
-    if (ret < 0)
-        return ret;
-
-    return yae_update(ctx);
+    return !strcmp(cmd, "tempo") ? yae_set_tempo(ctx, arg) : AVERROR(ENOSYS);
 }
 
 static const AVFilterPad atempo_inputs[] = {
@@ -1173,6 +1190,7 @@ static const AVFilterPad atempo_inputs[] = {
         .filter_frame = filter_frame,
         .config_props = config_props,
     },
+    { NULL }
 };
 
 static const AVFilterPad atempo_outputs[] = {
@@ -1181,9 +1199,10 @@ static const AVFilterPad atempo_outputs[] = {
         .request_frame = request_frame,
         .type          = AVMEDIA_TYPE_AUDIO,
     },
+    { NULL }
 };
 
-const AVFilter ff_af_atempo = {
+AVFilter ff_af_atempo = {
     .name            = "atempo",
     .description     = NULL_IF_CONFIG_SMALL("Adjust audio tempo."),
     .init            = init,
@@ -1192,6 +1211,6 @@ const AVFilter ff_af_atempo = {
     .process_command = process_command,
     .priv_size       = sizeof(ATempoContext),
     .priv_class      = &atempo_class,
-    FILTER_INPUTS(atempo_inputs),
-    FILTER_OUTPUTS(atempo_outputs),
+    .inputs          = atempo_inputs,
+    .outputs         = atempo_outputs,
 };

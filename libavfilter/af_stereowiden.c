@@ -39,14 +39,13 @@ typedef struct StereoWidenContext {
 } StereoWidenContext;
 
 #define OFFSET(x) offsetof(StereoWidenContext, x)
-#define A  AV_OPT_FLAG_AUDIO_PARAM|AV_OPT_FLAG_FILTERING_PARAM
-#define AT AV_OPT_FLAG_AUDIO_PARAM|AV_OPT_FLAG_FILTERING_PARAM|AV_OPT_FLAG_RUNTIME_PARAM
+#define A AV_OPT_FLAG_AUDIO_PARAM|AV_OPT_FLAG_FILTERING_PARAM
 
 static const AVOption stereowiden_options[] = {
     { "delay",     "set delay time",    OFFSET(delay),     AV_OPT_TYPE_FLOAT, {.dbl=20}, 1, 100, A },
-    { "feedback",  "set feedback gain", OFFSET(feedback),  AV_OPT_TYPE_FLOAT, {.dbl=.3}, 0, 0.9, AT },
-    { "crossfeed", "set cross feed",    OFFSET(crossfeed), AV_OPT_TYPE_FLOAT, {.dbl=.3}, 0, 0.8, AT },
-    { "drymix",    "set dry-mix",       OFFSET(drymix),    AV_OPT_TYPE_FLOAT, {.dbl=.8}, 0, 1.0, AT },
+    { "feedback",  "set feedback gain", OFFSET(feedback),  AV_OPT_TYPE_FLOAT, {.dbl=.3}, 0, 0.9, A },
+    { "crossfeed", "set cross feed",    OFFSET(crossfeed), AV_OPT_TYPE_FLOAT, {.dbl=.3}, 0, 0.8, A },
+    { "drymix",    "set dry-mix",       OFFSET(drymix),    AV_OPT_TYPE_FLOAT, {.dbl=.8}, 0, 1.0, A },
     { NULL }
 };
 
@@ -64,7 +63,8 @@ static int query_formats(AVFilterContext *ctx)
         (ret = ff_set_common_channel_layouts (ctx     , layout             )) < 0)
         return ret;
 
-    return ff_set_common_all_samplerates(ctx);
+    formats = ff_all_samplerates();
+    return ff_set_common_samplerates(ctx, formats);
 }
 
 static int config_input(AVFilterLink *inlink)
@@ -113,13 +113,8 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
         if (s->cur == s->buffer + s->length)
             s->cur = s->buffer;
 
-        if (ctx->is_disabled) {
-            dst[0] = left;
-            dst[1] = right;
-        } else {
-            dst[0] = drymix * left - crossfeed * right - feedback * s->cur[1];
-            dst[1] = drymix * right - crossfeed * left - feedback * s->cur[0];
-        }
+        dst[0] = drymix * left - crossfeed * right - feedback * s->cur[1];
+        dst[1] = drymix * right - crossfeed * left - feedback * s->cur[0];
 
         s->cur[0] = left;
         s->cur[1] = right;
@@ -144,6 +139,7 @@ static const AVFilterPad inputs[] = {
         .filter_frame = filter_frame,
         .config_props = config_input,
     },
+    { NULL }
 };
 
 static const AVFilterPad outputs[] = {
@@ -151,17 +147,16 @@ static const AVFilterPad outputs[] = {
         .name = "default",
         .type = AVMEDIA_TYPE_AUDIO,
     },
+    { NULL }
 };
 
-const AVFilter ff_af_stereowiden = {
+AVFilter ff_af_stereowiden = {
     .name           = "stereowiden",
     .description    = NULL_IF_CONFIG_SMALL("Apply stereo widening effect."),
     .query_formats  = query_formats,
     .priv_size      = sizeof(StereoWidenContext),
     .priv_class     = &stereowiden_class,
     .uninit         = uninit,
-    FILTER_INPUTS(inputs),
-    FILTER_OUTPUTS(outputs),
-    .flags          = AVFILTER_FLAG_SUPPORT_TIMELINE_INTERNAL,
-    .process_command = ff_filter_process_command,
+    .inputs         = inputs,
+    .outputs        = outputs,
 };

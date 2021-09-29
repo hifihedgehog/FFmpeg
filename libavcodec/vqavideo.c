@@ -147,7 +147,7 @@ static av_cold int vqa_decode_init(AVCodecContext *avctx)
     }
     s->width = AV_RL16(&s->avctx->extradata[6]);
     s->height = AV_RL16(&s->avctx->extradata[8]);
-    if ((ret = ff_set_dimensions(avctx, s->width, s->height)) < 0) {
+    if ((ret = av_image_check_size(s->width, s->height, 0, avctx)) < 0) {
         s->width= s->height= 0;
         return ret;
     }
@@ -171,17 +171,17 @@ static av_cold int vqa_decode_init(AVCodecContext *avctx)
     s->codebook_size = MAX_CODEBOOK_SIZE;
     s->codebook = av_malloc(s->codebook_size);
     if (!s->codebook)
-        return AVERROR(ENOMEM);
+        goto fail;
     s->next_codebook_buffer = av_malloc(s->codebook_size);
     if (!s->next_codebook_buffer)
-        return AVERROR(ENOMEM);
+        goto fail;
 
     /* allocate decode buffer */
     s->decode_buffer_size = (s->width / s->vector_width) *
         (s->height / s->vector_height) * 2;
     s->decode_buffer = av_mallocz(s->decode_buffer_size);
     if (!s->decode_buffer)
-        return AVERROR(ENOMEM);
+        goto fail;
 
     /* initialize the solid-color vectors */
     if (s->vector_height == 4) {
@@ -198,6 +198,11 @@ static av_cold int vqa_decode_init(AVCodecContext *avctx)
     s->next_codebook_buffer_index = 0;
 
     return 0;
+fail:
+    av_freep(&s->codebook);
+    av_freep(&s->next_codebook_buffer);
+    av_freep(&s->decode_buffer);
+    return AVERROR(ENOMEM);
 }
 
 #define CHECK_COUNT() \
@@ -632,12 +637,7 @@ static av_cold int vqa_decode_end(AVCodecContext *avctx)
     return 0;
 }
 
-static const AVCodecDefault vqa_defaults[] = {
-    { "max_pixels", "320*240" },
-    { NULL },
-};
-
-const AVCodec ff_vqa_decoder = {
+AVCodec ff_vqa_decoder = {
     .name           = "vqavideo",
     .long_name      = NULL_IF_CONFIG_SMALL("Westwood Studios VQA (Vector Quantized Animation) video"),
     .type           = AVMEDIA_TYPE_VIDEO,
@@ -647,6 +647,4 @@ const AVCodec ff_vqa_decoder = {
     .close          = vqa_decode_end,
     .decode         = vqa_decode_frame,
     .capabilities   = AV_CODEC_CAP_DR1,
-    .defaults       = vqa_defaults,
-    .caps_internal  = FF_CODEC_CAP_INIT_THREADSAFE | FF_CODEC_CAP_INIT_CLEANUP,
 };

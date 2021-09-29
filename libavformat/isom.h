@@ -27,6 +27,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "libavcodec/get_bits.h"
+#include "libavcodec/put_bits.h"
+
+#include "libavutil/dovi_meta.h"
 #include "libavutil/encryption_info.h"
 #include "libavutil/mastering_display_metadata.h"
 #include "libavutil/spherical.h"
@@ -129,7 +133,6 @@ typedef struct MOVFragmentStreamInfo {
     int64_t sidx_pts;
     int64_t first_tfra_pts;
     int64_t tfdt_dts;
-    int64_t next_trun_dts;
     int index_entry;
     MOVEncryptionIndex *encryption_index;
 } MOVFragmentStreamInfo;
@@ -164,8 +167,6 @@ typedef struct MOVStreamContext {
     int64_t *chunk_offsets;
     unsigned int stts_count;
     MOVStts *stts_data;
-    unsigned int sdtp_count;
-    uint8_t *sdtp_data;
     unsigned int ctts_count;
     unsigned int ctts_allocated_size;
     MOVStts *ctts_data;
@@ -277,7 +278,6 @@ typedef struct MOVContext {
     int moov_retry;
     int use_mfra_for;
     int has_looked_for_mfra;
-    int use_tfdt;
     MOVFragmentIndex frag_index;
     int atom_depth;
     unsigned int aax_mode;  ///< 'aax' file has been detected
@@ -287,17 +287,12 @@ typedef struct MOVContext {
     int activation_bytes_size;
     void *audible_fixed_key;
     int audible_fixed_key_size;
-    void *audible_key;
-    int audible_key_size;
-    void *audible_iv;
-    int audible_iv_size;
     struct AVAES *aes_decrypt;
     uint8_t *decryption_key;
     int decryption_key_len;
     int enable_drefs;
     int32_t movie_display_matrix[3][3]; ///< display matrix from mvhd
-    int have_read_mfra_size;
-    uint32_t mfra_size;
+    int64_t header_size;
 } MOVContext;
 
 int ff_mp4_read_descr_len(AVIOContext *pb);
@@ -369,6 +364,11 @@ int ff_mov_read_esds(AVFormatContext *fc, AVIOContext *pb);
 int ff_mov_read_stsd_entries(MOVContext *c, AVIOContext *pb, int entries);
 void ff_mov_write_chan(AVIOContext *pb, int64_t channel_layout);
 
+#define MOV_DVCC_DVVC_SIZE 24
+int ff_mov_parse_dvcc_dvvc(AVStream *st, GetBitContext *gb, void *log_ctx);
+int ff_mov_put_dvcc_dvvc(uint8_t *out, int size, uint32_t *type,
+                         AVDOVIDecoderConfigurationRecord *dovi, void *log_ctx);
+
 #define FF_MOV_FLAG_MFRA_AUTO -1
 #define FF_MOV_FLAG_MFRA_DTS 1
 #define FF_MOV_FLAG_MFRA_PTS 2
@@ -386,8 +386,5 @@ static inline enum AVCodecID ff_mov_get_lpcm_codec_id(int bps, int flags)
      */
     return ff_get_pcm_codec_id(bps, flags & 1, flags & 2, flags & 4 ? -1 : 0);
 }
-
-#define MOV_ISMV_TTML_TAG MKTAG('d', 'f', 'x', 'p')
-#define MOV_MP4_TTML_TAG  MKTAG('s', 't', 'p', 'p')
 
 #endif /* AVFORMAT_ISOM_H */

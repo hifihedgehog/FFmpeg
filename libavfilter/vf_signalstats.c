@@ -50,7 +50,6 @@ typedef struct SignalstatsContext {
     int nb_jobs;
     int *jobs_rets;
 
-    int maxsize;    // history stats array size
     int *histy, *histu, *histv, *histsat;
 
     AVFrame *frame_sat;
@@ -134,7 +133,10 @@ static int query_formats(AVFilterContext *ctx)
         AV_PIX_FMT_NONE
     };
 
-    return ff_set_common_formats_from_list(ctx, pix_fmts);
+    AVFilterFormats *fmts_list = ff_make_format_list(pix_fmts);
+    if (!fmts_list)
+        return AVERROR(ENOMEM);
+    return ff_set_common_formats(ctx, fmts_list);
 }
 
 static AVFrame *alloc_frame(enum AVPixelFormat pixfmt, int w, int h)
@@ -147,7 +149,7 @@ static AVFrame *alloc_frame(enum AVPixelFormat pixfmt, int w, int h)
     frame->width  = w;
     frame->height = h;
 
-    if (av_frame_get_buffer(frame, 0) < 0) {
+    if (av_frame_get_buffer(frame, 32) < 0) {
         av_frame_free(&frame);
         return NULL;
     }
@@ -155,7 +157,7 @@ static AVFrame *alloc_frame(enum AVPixelFormat pixfmt, int w, int h)
     return frame;
 }
 
-static int config_output(AVFilterLink *outlink)
+static int config_props(AVFilterLink *outlink)
 {
     AVFilterContext *ctx = outlink->src;
     SignalstatsContext *s = ctx->priv;
@@ -164,14 +166,15 @@ static int config_output(AVFilterLink *outlink)
     s->hsub = desc->log2_chroma_w;
     s->vsub = desc->log2_chroma_h;
     s->depth = desc->comp[0].depth;
-    s->maxsize = 1 << s->depth;
-    s->histy = av_malloc_array(s->maxsize, sizeof(*s->histy));
-    s->histu = av_malloc_array(s->maxsize, sizeof(*s->histu));
-    s->histv = av_malloc_array(s->maxsize, sizeof(*s->histv));
-    s->histsat = av_malloc_array(s->maxsize, sizeof(*s->histsat));
+    if (s->depth > 8) {
+        s->histy = av_malloc_array(1 << s->depth, sizeof(*s->histy));
+        s->histu = av_malloc_array(1 << s->depth, sizeof(*s->histu));
+        s->histv = av_malloc_array(1 << s->depth, sizeof(*s->histv));
+        s->histsat = av_malloc_array(1 << s->depth, sizeof(*s->histsat));
 
-    if (!s->histy || !s->histu || !s->histv || !s->histsat)
-        return AVERROR(ENOMEM);
+        if (!s->histy || !s->histu || !s->histv || !s->histsat)
+            return AVERROR(ENOMEM);
+    }
 
     outlink->w = inlink->w;
     outlink->h = inlink->h;
@@ -459,6 +462,8 @@ static const struct {
     {NULL}
 };
 
+#define DEPTH 256
+
 static int compute_sat_hue_metrics8(AVFilterContext *ctx, void *arg, int jobnr, int nb_jobs)
 {
     int i, j;
@@ -485,8 +490,8 @@ static int compute_sat_hue_metrics8(AVFilterContext *ctx, void *arg, int jobnr, 
         for (i = 0; i < s->chromaw; i++) {
             const int yuvu = p_u[i];
             const int yuvv = p_v[i];
-            p_sat[i] = hypotf(yuvu - 128, yuvv - 128); // int or round?
-            ((int16_t*)p_hue)[i] = fmodf(floorf((180.f / M_PI) * atan2f(yuvu-128, yuvv-128) + 180.f), 360.f);
+            p_sat[i] = hypot(yuvu - 128, yuvv - 128); // int or round?
+            ((int16_t*)p_hue)[i] = floor((180 / M_PI) * atan2f(yuvu-128, yuvv-128) + 180);
         }
         p_u   += lsz_u;
         p_v   += lsz_v;
@@ -524,8 +529,8 @@ static int compute_sat_hue_metrics16(AVFilterContext *ctx, void *arg, int jobnr,
         for (i = 0; i < s->chromaw; i++) {
             const int yuvu = p_u[i];
             const int yuvv = p_v[i];
-            p_sat[i] = hypotf(yuvu - mid, yuvv - mid); // int or round?
-            ((int16_t*)p_hue)[i] = fmodf(floorf((180.f / M_PI) * atan2f(yuvu-mid, yuvv-mid) + 180.f), 360.f);
+            p_sat[i] = hypot(yuvu - mid, yuvv - mid); // int or round?
+            ((int16_t*)p_hue)[i] = floor((180 / M_PI) * atan2f(yuvu-mid, yuvv-mid) + 180);
         }
         p_u   += lsz_u;
         p_v   += lsz_v;
@@ -552,11 +557,11 @@ static int filter_frame8(AVFilterLink *link, AVFrame *in)
         pw = 0, cpw = 0; // prev
     int fil;
     char metabuf[128];
-    unsigned int *histy = s->histy,
-                 *histu = s->histu,
-                 *histv = s->histv,
+    unsigned int histy[DEPTH] = {0},
+                 histu[DEPTH] = {0},
+                 histv[DEPTH] = {0},
                  histhue[360] = {0},
-                 *histsat = s->histsat;
+                 histsat[DEPTH] = {0}; // limited to 8 bit data.
     int miny  = -1, minu  = -1, minv  = -1;
     int maxy  = -1, maxu  = -1, maxv  = -1;
     int lowy  = -1, lowu  = -1, lowv  = -1;
@@ -596,11 +601,10 @@ static int filter_frame8(AVFilterLink *link, AVFrame *in)
         av_frame_make_writable(out);
     }
 
-    ff_filter_execute(ctx, compute_sat_hue_metrics8, &td_huesat,
-                      NULL, FFMIN(s->chromah, ff_filter_get_nb_threads(ctx)));
+    ctx->internal->execute(ctx, compute_sat_hue_metrics8, &td_huesat,
+                           NULL, FFMIN(s->chromah, ff_filter_get_nb_threads(ctx)));
 
     // Calculate luma histogram and difference with previous frame or field.
-    memset(s->histy, 0, s->maxsize * sizeof(*s->histy));
     for (j = 0; j < link->h; j++) {
         for (i = 0; i < link->w; i++) {
             const int yuv = in->data[0][w + i];
@@ -614,9 +618,6 @@ static int filter_frame8(AVFilterLink *link, AVFrame *in)
     }
 
     // Calculate chroma histogram and difference with previous frame or field.
-    memset(s->histu, 0, s->maxsize * sizeof(*s->histu));
-    memset(s->histv, 0, s->maxsize * sizeof(*s->histv));
-    memset(s->histsat, 0, s->maxsize * sizeof(*s->histsat));
     for (j = 0; j < s->chromah; j++) {
         for (i = 0; i < s->chromaw; i++) {
             const int yuvu = in->data[1][cw+i];
@@ -645,8 +646,8 @@ static int filter_frame8(AVFilterLink *link, AVFrame *in)
                 .out = out != in && s->outfilter == fil ? out : NULL,
             };
             memset(s->jobs_rets, 0, s->nb_jobs * sizeof(*s->jobs_rets));
-            ff_filter_execute(ctx, filters_def[fil].process8,
-                              &td, s->jobs_rets, s->nb_jobs);
+            ctx->internal->execute(ctx, filters_def[fil].process8,
+                                   &td, s->jobs_rets, s->nb_jobs);
             for (i = 0; i < s->nb_jobs; i++)
                 filtot[fil] += s->jobs_rets[i];
         }
@@ -661,7 +662,7 @@ static int filter_frame8(AVFilterLink *link, AVFrame *in)
     chighp = lrint(s->cfs * 90 / 100.);
 
     accy = accu = accv = accsat = 0;
-    for (fil = 0; fil < s->maxsize; fil++) {
+    for (fil = 0; fil < DEPTH; fil++) {
         if (miny   < 0 && histy[fil])   miny = fil;
         if (minu   < 0 && histu[fil])   minu = fil;
         if (minv   < 0 && histv[fil])   minv = fil;
@@ -818,11 +819,11 @@ static int filter_frame16(AVFilterLink *link, AVFrame *in)
         av_frame_make_writable(out);
     }
 
-    ff_filter_execute(ctx, compute_sat_hue_metrics16, &td_huesat,
-                      NULL, FFMIN(s->chromah, ff_filter_get_nb_threads(ctx)));
+    ctx->internal->execute(ctx, compute_sat_hue_metrics16, &td_huesat,
+                           NULL, FFMIN(s->chromah, ff_filter_get_nb_threads(ctx)));
 
     // Calculate luma histogram and difference with previous frame or field.
-    memset(s->histy, 0, s->maxsize * sizeof(*s->histy));
+    memset(s->histy, 0, (1 << s->depth) * sizeof(*s->histy));
     for (j = 0; j < link->h; j++) {
         for (i = 0; i < link->w; i++) {
             const int yuv = AV_RN16(in->data[0] + w + i * 2);
@@ -836,9 +837,9 @@ static int filter_frame16(AVFilterLink *link, AVFrame *in)
     }
 
     // Calculate chroma histogram and difference with previous frame or field.
-    memset(s->histu, 0, s->maxsize * sizeof(*s->histu));
-    memset(s->histv, 0, s->maxsize * sizeof(*s->histv));
-    memset(s->histsat, 0, s->maxsize * sizeof(*s->histsat));
+    memset(s->histu, 0, (1 << s->depth) * sizeof(*s->histu));
+    memset(s->histv, 0, (1 << s->depth) * sizeof(*s->histv));
+    memset(s->histsat, 0, (1 << s->depth) * sizeof(*s->histsat));
     for (j = 0; j < s->chromah; j++) {
         for (i = 0; i < s->chromaw; i++) {
             const int yuvu = AV_RN16(in->data[1] + cw + i * 2);
@@ -867,8 +868,8 @@ static int filter_frame16(AVFilterLink *link, AVFrame *in)
                 .out = out != in && s->outfilter == fil ? out : NULL,
             };
             memset(s->jobs_rets, 0, s->nb_jobs * sizeof(*s->jobs_rets));
-            ff_filter_execute(ctx, filters_def[fil].process16,
-                              &td, s->jobs_rets, s->nb_jobs);
+            ctx->internal->execute(ctx, filters_def[fil].process16,
+                                   &td, s->jobs_rets, s->nb_jobs);
             for (i = 0; i < s->nb_jobs; i++)
                 filtot[fil] += s->jobs_rets[i];
         }
@@ -883,7 +884,7 @@ static int filter_frame16(AVFilterLink *link, AVFrame *in)
     chighp = lrint(s->cfs * 90 / 100.);
 
     accy = accu = accv = accsat = 0;
-    for (fil = 0; fil < s->maxsize; fil++) {
+    for (fil = 0; fil < 1 << s->depth; fil++) {
         if (miny   < 0 && histy[fil])   miny = fil;
         if (minu   < 0 && histu[fil])   minu = fil;
         if (minv   < 0 && histv[fil])   minv = fil;
@@ -997,25 +998,27 @@ static const AVFilterPad signalstats_inputs[] = {
         .type           = AVMEDIA_TYPE_VIDEO,
         .filter_frame   = filter_frame,
     },
+    { NULL }
 };
 
 static const AVFilterPad signalstats_outputs[] = {
     {
         .name           = "default",
-        .config_props   = config_output,
+        .config_props   = config_props,
         .type           = AVMEDIA_TYPE_VIDEO,
     },
+    { NULL }
 };
 
-const AVFilter ff_vf_signalstats = {
+AVFilter ff_vf_signalstats = {
     .name          = "signalstats",
     .description   = "Generate statistics from video analysis.",
     .init          = init,
     .uninit        = uninit,
     .query_formats = query_formats,
     .priv_size     = sizeof(SignalstatsContext),
-    FILTER_INPUTS(signalstats_inputs),
-    FILTER_OUTPUTS(signalstats_outputs),
+    .inputs        = signalstats_inputs,
+    .outputs       = signalstats_outputs,
     .priv_class    = &signalstats_class,
     .flags         = AVFILTER_FLAG_SLICE_THREADS,
 };

@@ -19,9 +19,7 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#include "libavutil/common.h"
-#include "libavutil/error.h"
-#include "libavutil/mem.h"
+#include "avcodec.h"
 #include "ass_split.h"
 
 typedef enum {
@@ -378,8 +376,6 @@ ASSSplitContext *ff_ass_split(const char *buf)
     ASSSplitContext *ctx = av_mallocz(sizeof(*ctx));
     if (!ctx)
         return NULL;
-    if (buf && !strncmp(buf, "\xef\xbb\xbf", 3)) // Skip UTF-8 BOM header
-        buf += 3;
     ctx->current_section = -1;
     if (ass_split(ctx, buf) < 0) {
         ff_ass_split_free(ctx);
@@ -412,6 +408,25 @@ static void free_section(ASSSplitContext *ctx, const ASSSection *section)
         av_freep((uint8_t *)&ctx->ass + section->offset);
 }
 
+ASSDialog *ff_ass_split_dialog(ASSSplitContext *ctx, const char *buf,
+                               int cache, int *number)
+{
+    ASSDialog *dialog = NULL;
+    int i, count;
+    if (!cache)
+        for (i=0; i<FF_ARRAY_ELEMS(ass_sections); i++)
+            if (!strcmp(ass_sections[i].section, "Events")) {
+                free_section(ctx, &ass_sections[i]);
+                break;
+            }
+    count = ctx->ass.dialogs_count;
+    if (ass_split(ctx, buf) == 0)
+        dialog = ctx->ass.dialogs + count;
+    if (number)
+        *number = ctx->ass.dialogs_count - count;
+    return dialog;
+}
+
 void ff_ass_free_dialog(ASSDialog **dialogp)
 {
     ASSDialog *dialog = *dialogp;
@@ -424,7 +439,7 @@ void ff_ass_free_dialog(ASSDialog **dialogp)
     av_freep(dialogp);
 }
 
-ASSDialog *ff_ass_split_dialog(ASSSplitContext *ctx, const char *buf)
+ASSDialog *ff_ass_split_dialog2(ASSSplitContext *ctx, const char *buf)
 {
     int i;
     static const ASSFields fields[] = {
@@ -480,20 +495,30 @@ int ff_ass_split_override_codes(const ASSCodesCallbacks *callbacks, void *priv,
     const char *text = NULL;
     char new_line[2];
     int text_len = 0;
+    int drawing = 0; //PLEX
 
     while (buf && *buf) {
         if (text && callbacks->text &&
-            (sscanf(buf, "\\%1[nN]", new_line) == 1 ||
-             !strncmp(buf, "{\\", 2))) {
+//PLEX
+            (sscanf(buf, "\\%1[nNh]", new_line) == 1 ||
+             *buf == '{') && !drawing) {
+//PLEX
             callbacks->text(priv, text, text_len);
             text = NULL;
         }
-        if (sscanf(buf, "\\%1[nN]", new_line) == 1) {
+//PLEX
+        if (sscanf(buf, "\\%1[h]", new_line) == 1) {
+            callbacks->text(priv, " ", 1);
+            buf += 2;
+        } else if (sscanf(buf, "\\%1[nN]", new_line) == 1) {
+//PLEX
             if (callbacks->new_line)
                 callbacks->new_line(priv, new_line[0] == 'N');
             buf += 2;
-        } else if (!strncmp(buf, "{\\", 2)) {
-            buf++;
+//PLEX
+        } else if (*buf == '{') {
+            buf += strcspn(buf, "\\}");  /* skip comments */;
+//PLEX
             while (*buf == '\\') {
                 char style[2], c[2], sep[2], c_num[2] = "0", tmp[128] = {0};
                 unsigned int color = 0xFFFFFFFF;
@@ -504,6 +529,10 @@ int ff_ass_split_override_codes(const ASSCodesCallbacks *callbacks, void *priv,
                     len += close != -1;
                     if (callbacks->style)
                         callbacks->style(priv, style[0], close);
+//PLEX
+                } else if (sscanf(buf, "\\p%u%1[\\}]%n", &size, sep, &len) > 1) {
+                    drawing = (size > 0);
+//PLEX
                 } else if (sscanf(buf, "\\c%1[\\}]%n", sep, &len) > 0 ||
                            sscanf(buf, "\\c&H%X&%1[\\}]%n", &color, sep, &len) > 1 ||
                            sscanf(buf, "\\%1[1234]c%1[\\}]%n", c_num, sep, &len) > 1 ||
@@ -552,7 +581,7 @@ int ff_ass_split_override_codes(const ASSCodesCallbacks *callbacks, void *priv,
                 buf += len - 1;
             }
             if (*buf++ != '}')
-                return AVERROR_INVALIDDATA;
+                goto end; //PLEX
         } else {
             if (!text) {
                 text = buf;
@@ -562,7 +591,8 @@ int ff_ass_split_override_codes(const ASSCodesCallbacks *callbacks, void *priv,
             buf++;
         }
     }
-    if (text && callbacks->text)
+end: //PLEX
+    if (text && callbacks->text && !drawing) //PLEX
         callbacks->text(priv, text, text_len);
     if (callbacks->end)
         callbacks->end(priv);
